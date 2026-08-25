@@ -1,0 +1,9 @@
+gymnasium
+imageio
+matplotlib
+mujoco
+numpy
+tensordict
+torch
+torchrl
+tqdm
