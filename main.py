@@ -8,16 +8,22 @@ import envs
 
 def main():
     torch.autograd.set_detect_anomaly(True)
+    #torch.cuda.memory._record_memory_history(max_entries=100000)
     env = envs.WallSimple()
     env.render_mode = None
     config = agents.SACAgentConfig()
 
     agent = agents.SACAgent(env, config)
     #agent.load()
-    history = agent.train(num_episodes=10)
+    try:
+        history = agent.train(num_episodes=1500)
+    except torch.OutOfMemoryError as e:
+        print(e)
+    finally:
+        env.close()
+        #torch.cuda.memory._dump_snapshot("profile.pkl")
+        #torch.cuda.memory._record_memory_history(enabled=None)
     #agent.save()
-
-    env.close()
 
 
 if __name__ == "__main__":
