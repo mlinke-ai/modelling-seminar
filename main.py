@@ -16,7 +16,7 @@ def main():
     agent = agents.SACAgent(env, config)
     #agent.load()
     try:
-        history = agent.train(num_episodes=1500)
+        history = agent.train(num_episodes=5)
     except torch.OutOfMemoryError as e:
         print(e)
     finally:
