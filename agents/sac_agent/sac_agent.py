@@ -14,300 +14,8 @@ import utils
 import tqdm
 import typing
 import math
-
-
-class UnfoldLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: tuple[int, ...], device=None, dtype=None) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super(UnfoldLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        shape = (self.in_features, *self.out_features)
-        self.weight = nn.Parameter(torch.empty(shape, **factory_kwargs))
-        self.bias = nn.Parameter(torch.empty(self.out_features, **factory_kwargs))
-        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        init.kaiming_uniform_(self.bias, a=math.sqrt(5))
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.einsum("...c,...cCHW->...CHW", input, self.weight) + self.bias
-
-
-class StateEncoder(nn.Module):
-    def __init__(self):
-        super(StateEncoder, self).__init__()
-
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=5, stride=3, padding=2),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 128),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 256),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 512),
-            nn.SiLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(512, 512),
-            nn.SiLU(),
-        )
-        self.depth_encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=5, stride=3, padding=2),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 128),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 256),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(4, 512),
-            nn.SiLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(512, 512),
-            nn.SiLU(),
-        )
-        self.gyro_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.accel_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.velo_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.pos_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.ori_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.tilt_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.wp_dir_encoder = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.wp_dist_encoder = nn.Sequential(
-            nn.Linear(1, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-        )
-        self.fused_encoder = nn.Sequential(
-            nn.Linear(1152, 1024),
-            nn.SiLU(inplace=True),
-            nn.Linear(1024, 768),
-            #nn.Tanh(),
-            nn.LayerNorm(768),
-        )
-
-        self.image_decoder = nn.Sequential(
-            UnfoldLinear(768, (512, 23, 40)),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.GroupNorm(4, 256),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.GroupNorm(4, 128),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=5, stride=1, padding=(0, 2)),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(64, 3, kernel_size=5, stride=3, padding=2, output_padding=2),
-            nn.Sigmoid(),
-        )
-        self.depth_decoder = nn.Sequential(
-            UnfoldLinear(768, (512, 23, 40)),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.GroupNorm(4, 256),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.GroupNorm(4, 128),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=5, stride=1, padding=(0, 2)),
-            nn.GroupNorm(4, 64),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(64, 1, kernel_size=5, stride=3, padding=2, output_padding=2),
-            nn.ReLU(),
-        )
-        self.gyro_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-        )
-        self.accel_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-        )
-        self.velo_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-        )
-        self.pos_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-        )
-        self.ori_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-            nn.Tanh(),
-        )
-        self.tilt_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-            nn.Tanh(),
-        )
-        self.wp_dir_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 3),
-            nn.Tanh(),
-        )
-        self.wp_dist_decoder = nn.Sequential(
-            nn.Linear(768, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 16),
-            nn.SiLU(inplace=True),
-            nn.Linear(16, 1),
-            nn.ReLU(),
-        )
-
-    def forward(self, obs):
-        enc = self.encode(obs)
-        dec = self.decode(enc)
-        return dec
-
-    def encode(self, obs):
-        enc_image = self.image_encoder(obs["image"])
-        enc_depth = self.depth_encoder(torch.log_(1.0 + obs["depth"]))
-        enc_gyro = self.gyro_encoder(obs["gyro"])
-        enc_accel = self.accel_encoder(obs["accel"])
-        enc_velo = self.velo_encoder(obs["velo"])
-        enc_pos = self.pos_encoder(obs["pos"])
-        enc_ori = self.ori_encoder(obs["ori"])
-        enc_tilt = self.tilt_encoder(obs["tilt"])
-        enc_wp_dir = self.wp_dir_encoder(obs["wp_dir"])
-        enc_wp_dist = self.wp_dist_encoder(obs["wp_dist"])
-        enc_fused = torch.cat(
-            (enc_image, enc_depth, enc_gyro, enc_accel, enc_velo, enc_pos, enc_ori, enc_tilt, enc_wp_dir, enc_wp_dist),
-            dim=-1,
-        )
-        return self.fused_encoder(enc_fused)
-
-    def decode(self, lat):
-        dec_image = self.image_decoder(lat)
-        dec_depth = self.depth_decoder(lat)
-        dec_gyro = self.gyro_decoder(lat)
-        dec_accel = self.accel_decoder(lat)
-        dec_velo = self.velo_decoder(lat)
-        dec_pos = self.pos_decoder(lat)
-        dec_ori = self.ori_decoder(lat)
-        dec_tilt = self.tilt_decoder(lat)
-        dec_wp_dir = self.wp_dir_decoder(lat)
-        dec_wp_dist = self.wp_dist_decoder(lat)
-        return tensordict.TensorDict(
-            {
-                "image": dec_image,
-                "depth": dec_depth,
-                "gyro": dec_gyro,
-                "accel": dec_accel,
-                "velo": dec_velo,
-                "pos": dec_pos,
-                "ori": dec_ori,
-                "tilt": dec_tilt,
-                "wp_dir": dec_wp_dir,
-                "wp_dist": dec_wp_dist,
-            }
-        )
-
-    def loss(self, prediction, target):
-        loss = F.mse_loss(prediction["image"], target["image"])
-        loss += F.mse_loss(prediction["depth"], target["depth"])
-        loss += F.mse_loss(prediction["gyro"], target["gyro"])
-        loss += F.mse_loss(prediction["accel"], target["accel"])
-        loss += F.mse_loss(prediction["velo"], target["velo"])
-        loss += F.mse_loss(prediction["pos"], target["pos"])
-        loss += F.mse_loss(prediction["ori"], target["ori"])
-        loss += F.mse_loss(prediction["tilt"], target["tilt"])
-        loss += F.mse_loss(prediction["wp_dir"], target["wp_dir"])
-        loss += F.mse_loss(prediction["wp_dist"], target["wp_dist"])
-        return loss
-
+from agents import state_encoder
+from agents import agent
 
 class Actor(nn.Module):
     def __init__(self, embed_size, action_size, max_action):
@@ -358,7 +66,7 @@ class Critic(nn.Module):
         return x
 
 
-class SACAgent:
+class SACAgent(agent.Agent):
     def __init__(self, env, config):
         self.env = env
         self.config = config
@@ -378,7 +86,7 @@ class SACAgent:
         )  # prefetch: int (prefetch N batches), transform: Callable (convert uint8[0; 255] images to float32[0.0; 1.0])
 
         # Networks
-        self.state_encoder = StateEncoder().to(self.device)
+        self.state_encoder = state_encoder.StateEncoder().to(self.device)
         self.actor = Actor(self.config.embed_size, self.config.action_size, self.config.max_action).to(self.device)
         self.q1_critic = Critic(self.config.embed_size, self.config.action_size).to(self.device)
         self.q2_critic = Critic(self.config.embed_size, self.config.action_size).to(self.device)
@@ -400,17 +108,11 @@ class SACAgent:
         self.alpha = torch.tensor(self.config.alpha_init, dtype=torch.float32, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.SGD([self.alpha], lr=self.config.alpha_lr)
 
-        # reset gradients before first update
-        self.q1_optimizer.zero_grad()
-        self.q2_optimizer.zero_grad()
-        self.actor_optimizer.zero_grad()
-        self.alpha_optimizer.zero_grad()
-
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
             lat = self.state_encoder.encode(obs.unsqueeze(0))
             action, _ = self.actor.sample(lat, probabilistic=probabilistic)
-        return action.cpu().data.numpy().flatten()
+        return action.squeeze().numpy(force=True)
 
     def soft_update(self):
         for (
@@ -430,34 +132,41 @@ class SACAgent:
         assert (
             self.config.batch_size <= self.replay_buffer.write_count
         ), "Replay buffer is not sufficiently filled for sampling!"
-        trajectory = self.replay_buffer.sample(self.config.batch_size).to(self.device)
+        transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
         with torch.no_grad():
-            next_lat = self.state_encoder.encode(trajectory["next_obs"])
+            next_lat = self.state_encoder.encode(transitions["next_obs"])
             next_actions, next_log_probs = self.actor.sample(next_lat)
             q1_t = self.q1_target(next_lat, next_actions)
             q2_t = self.q2_target(next_lat, next_actions)
             q_t = torch.min(q1_t, q2_t) - torch.unsqueeze(self.alpha * next_log_probs, -1)
-            q_t = trajectory["rewards"] + (1.0 - trajectory["dones"]) * self.config.gamma * q_t
+            q_t = transitions["rewards"] + (1.0 - transitions["dones"]) * self.config.gamma * q_t
 
         # update state encoder
         self.state_encoder_optimizer.zero_grad()
-        lat = self.state_encoder.encode(trajectory["obs"])
+        lat = self.state_encoder.encode(transitions["obs"])
         lat_detached = lat.detach().clone()
         obs_reconstructed = self.state_encoder.decode(lat)
-        state_encoder_loss = self.state_encoder.loss(obs_reconstructed, trajectory["obs"])
+        state_encoder_loss = self.state_encoder.loss(obs_reconstructed, transitions["obs"])
         state_encoder_loss.backward()
         #print(f"{state_encoder_loss=}")
         self.state_encoder_optimizer.step()
 
         # update critics
-        q1_c = self.q1_critic(lat_detached, trajectory["actions"])
-        q2_c = self.q2_critic(lat_detached, trajectory["actions"])
+        self.q1_optimizer.zero_grad()
+        self.q2_optimizer.zero_grad()
+        q1_c = self.q1_critic(lat_detached, transitions["actions"])
+        q2_c = self.q2_critic(lat_detached, transitions["actions"])
         q1_loss = F.mse_loss(q1_c, q_t)
         q2_loss = F.mse_loss(q2_c, q_t)
         q1_loss.backward()
         q2_loss.backward()
+        nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 1.0)
+        nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 1.0)
+        self.q1_optimizer.step()
+        self.q2_optimizer.step()
 
         # update actor
+        self.actor_optimizer.zero_grad()
         new_actions, new_log_probs = self.actor.sample(lat_detached)
         a = new_actions.detach().clone()
         with torch.no_grad():
@@ -466,25 +175,17 @@ class SACAgent:
             new_q_c = torch.min(new_q1_c, new_q2_c)
         actor_loss = (new_q_c - torch.unsqueeze(self.alpha * new_log_probs, -1)).mean()
         actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        self.actor_optimizer.step()
 
         # update entropy
+        self.alpha_optimizer.zero_grad()
         alpha_loss = -(self.alpha * (new_log_probs + self.target_entropy).detach()).mean()
         alpha_loss.backward()
+        self.alpha_optimizer.step()
 
         # update targets
-        if self.steps % self.config.update_interval == 0:
-            nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 1.0)
-            nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 1.0)
-            self.q1_optimizer.step()
-            self.q2_optimizer.step()
-            nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-            self.actor_optimizer.step()
-            self.alpha_optimizer.step()
-            self.q1_optimizer.zero_grad()
-            self.q2_optimizer.zero_grad()
-            self.actor_optimizer.zero_grad()
-            self.alpha_optimizer.zero_grad()
-            self.soft_update()
+        self.soft_update()
 
     def step(self, evaluate=False):
         done = False
