@@ -70,7 +70,6 @@ class SACAgent(agent.Agent):
     def __init__(self, env, config):
         self.env = env
         self.config = config
-        self.steps = 0
         # Device management
         if torch.cuda.is_available():
             self.device = torch.device(self.config.device)
@@ -187,7 +186,7 @@ class SACAgent(agent.Agent):
         # update targets
         self.soft_update()
 
-    def step(self, evaluate=False):
+    def step(self, num_steps=0, evaluate=False):
         done = False
         episode_steps = 0
         episode_reward = 0.0
@@ -200,10 +199,13 @@ class SACAgent(agent.Agent):
             if not evaluate:
                 self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
                 self.update()
-            obs = next_obs
             episode_reward += reward
             episode_steps += 1
-            self.steps += 1
+            if episode_steps < num_steps and done:
+                obs, _ = self.env.reset()
+                done = False
+            else:
+                obs = next_obs
         return episode_reward, episode_steps, info
 
     def _to_tensordict(self, obs, action, reward, next_obs, done):
@@ -216,25 +218,23 @@ class SACAgent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, num_episodes):
-        # fill replay buffer with random transitions
-        print("Prefill replay buffer")
-        render_mode_bak = self.env.render_mode
-        self.env.render_mode = None
-        obs, _ = self.env.reset()
-        p_bar = tqdm.tqdm(total=max(self.config.batch_size, self.config.replay_buffer_prefill_size))
-        while self.replay_buffer.write_count < max(self.config.batch_size, self.config.replay_buffer_prefill_size):
-            action = self.env.action_space.sample()
-            next_obs, reward, terminated, truncated, _ = self.env.step(action)
-            done = terminated or truncated
-            self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
-            if done:
-                obs, _ = self.env.reset()
-            else:
-                obs = next_obs
-            p_bar.update()
-        p_bar.close()
-        self.env.render_mode = render_mode_bak
+    def train(self, num_episodes, num_steps=0):
+        # prefill replay buffer
+        missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
+        if missing > 0:
+            render_mode_bak = self.env.render_mode
+            self.env.render_mode = None
+            obs, _ = self.env.reset()
+            for _ in tqdm.tqdm(range(missing)):
+                action = self.env.action_space.sample()
+                next_obs, reward, terminated, truncated, _ = self.env.step(action)
+                done = terminated or truncated
+                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
+                if done:
+                    obs, _ = self.env.reset()
+                else:
+                    obs = next_obs
+            self.env.render_mode = render_mode_bak
         # train agent
         print("Start training")
         history = {
@@ -242,7 +242,7 @@ class SACAgent(agent.Agent):
             "steps": np.zeros(num_episodes, dtype=np.uint32),
         }
         for episode in range(num_episodes):
-            reward, steps, info = self.step()
+            reward, steps, info = self.step(num_steps=num_steps)
             history["rewards"][episode] = reward
             history["steps"][episode] = steps
             print(f"{episode}: {steps=} {reward=}")

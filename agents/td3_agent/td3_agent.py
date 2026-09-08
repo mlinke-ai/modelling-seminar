@@ -45,9 +45,8 @@ class TD3Agent(agent.Agent):
     def __init__(self, env, config):
         self.env = env
         self.config = config
-        self.steps = 0
         # Device management
-        if torch.cuda.is_avaliable():
+        if torch.cuda.is_available():
             self.device = torch.device(self.config.device)
         else:
             self.device = torch.device("cpu")
@@ -63,32 +62,32 @@ class TD3Agent(agent.Agent):
         self.q2_critic = Critic().to(self.device)
         self.q1_target = Critic().to(self.device)
         self.q2_target = Critic().to(self.device)
-        self.p_target.loat_state_dict(self.p_actor.state_dict())
+        self.p_target.load_state_dict(self.p_actor.state_dict())
         self.q1_target.load_state_dict(self.q1_critic.state_dict())
         self.q2_target.load_state_dict(self.q2_critic.state_dict())
 
         # Optimizers
         self.state_encoder_optimizer = optim.SGD(self.state_encoder.parameters(), lr=self.config.state_encoder_lr)
-        self.p_optimizer = optim.SGD(self.p_actor.parameters, lr=self.config.actor_lr, maximize=True)
+        self.p_optimizer = optim.SGD(self.p_actor.parameters(), lr=self.config.actor_lr, maximize=True)
         self.q1_optimizer = optim.SGD(self.q1_critic.parameters(), lr=self.config.critic_lr)
         self.q2_optimizer = optim.SGD(self.q2_critic.parameters(), lr=self.config.critic_lr)
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
             lat = self.state_encoder.encode(obs.unsqueeze(0))
-            action, _ = self.p_actor(lat)
+            action = self.p_actor(lat)
             e = torch.randn_like(action) if probabilistic else 0.0
             action = torch.clip(action + e, 0.0, 1.0)
         return action.squeeze().numpy(force=True)
 
     def soft_update(self):
-        for pa, pt in zip(self.p_actor.parameters(), self.p_target.paramters()):
+        for pa, pt in zip(self.p_actor.parameters(), self.p_target.parameters()):
             pt.data.mul_(self.config.tau)
             pt.data.add_((1.0 - self.config.tau) * pa.data)
-        for pc, pt in zip(self.q1_critic.paramters(), self.q1_target.parameters()):
+        for pc, pt in zip(self.q1_critic.parameters(), self.q1_target.parameters()):
             pt.data.mul_(self.config.tau)
             pt.data.add_((1.0 - self.config.tau) * pc.data)
-        for pc, pt in zip(self.q2_critic.paramters(), self.q2_target.parameters()):
+        for pc, pt in zip(self.q2_critic.parameters(), self.q2_target.parameters()):
             pt.data.mul_(self.config.tau)
             pt.data.add_((1.0 - self.config.tau) * pc.data)
 
@@ -99,7 +98,7 @@ class TD3Agent(agent.Agent):
             with torch.no_grad():
                 next_lat = self.state_encoder.encode(transitions["next_obs"])
                 next_samples = self.p_target(next_lat)
-                e = torch.clip(torch.randn_like(next_samples) * self.config.update_sd, -self.config.max_noise, self.config.max_noise)
+                e = torch.clip(torch.randn_like(next_samples) * self.config.update_noise, -self.config.noise_clip, self.config.noise_clip)
                 next_actions = torch.clip(next_samples + e, 0.0, 1.0)
                 q1_t = self.q1_target(next_lat, next_actions)
                 q2_t = self.q2_target(next_lat, next_actions)
@@ -110,7 +109,7 @@ class TD3Agent(agent.Agent):
             self.state_encoder_optimizer.zero_grad()
             lat = self.state_encoder.encode(transitions["obs"])
             lat_detached = lat.detach().clone()
-            obs_reconstructed = self.state_encoder_decode(lat)
+            obs_reconstructed = self.state_encoder.decode(lat)
             state_encoder_loss = self.state_encoder.loss(obs_reconstructed, transitions["obs"])
             state_encoder_loss.backward()
             #print(f"{state_encoder_loss=}")
@@ -128,20 +127,20 @@ class TD3Agent(agent.Agent):
             self.q1_optimizer.step()
             self.q2_optimizer.step()
 
-            if j % self.config.update_interval == 0:
+            if (j + 1) % self.config.update_interval == 0:
                 self.p_optimizer.zero_grad()
                 actions = self.p_actor(lat_detached)
-                q_c = self.q1_actor(lat_detached, actions)
+                q_c = self.q1_critic(lat_detached, actions)
                 p_loss = q_c.mean()
                 p_loss.backward()
                 self.p_optimizer.step()
                 self.soft_update()
 
-    def step(self, evaluate=False):
+    def step(self, num_steps=0, evaluate=False):
         done = False
         episode_steps = 0
         episode_reward = 0.0
-        obs, _ self.env.reset()
+        obs, _ = self.env.reset()
         while not done:
             obs = obs.to(self.device)
             action = self.select_action(obs, probabilistic=not evaluate)
@@ -150,10 +149,13 @@ class TD3Agent(agent.Agent):
             if not evaluate:
                 self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
                 self.update()
-            obs = next_obs
             episode_reward += reward
             episode_steps += 1
-            self.steps += 1
+            if episode_steps < num_steps and done:
+                obs, _ = self.env.reset()
+                done = False
+            else:
+                obs = next_obs
         return episode_reward, episode_steps, info
 
     def _to_tensordict(self, obs, action, reward, next_obs, done):
@@ -166,25 +168,23 @@ class TD3Agent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, num_episodes):
-        # fill replay buffer with random transitions
-        print("Prefill replay buffer")
-        render_mode_bak = self.env.render_mode
-        self.env.render_mode = None
-        obs, _ = self.env.reset()
-        p_bar = tqdm.tqdm(total=max(self.config.batch_size, self.config.replay_buffer_prefill_size))
-        while self.replay_buffer.write_count < max(self.config.batch_size, self.config.replay_buffer_prefill_size):
-            action = self.env.action_space.sample()
-            next_obs, reward, terminated, truncated, _ = self.env.step(action)
-            done = terminated or truncated
-            self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
-            if done:
-                obs, _ = self.env.reset()
-            else:
-                obs = next_obs
-            p_bar.update()
-        p_bar.close()
-        self.env.render_mode = render_mode_bak
+    def train(self, num_episodes, num_steps=0):
+        # prefill replay buffer
+        missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
+        if missing > 0:
+            render_mode_bak = self.env.render_mode
+            self.env.render_mode = None
+            obs, _ = self.env.reset()
+            for _ in tqdm.tqdm(range(missing)):
+                action = self.env.action_space.sample()
+                next_obs, reward, terminated, truncated, _ = self.env.step(action)
+                done = terminated or truncated
+                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
+                if done:
+                    obs, _  = self.env.reset()
+                else:
+                    obs = next_obs
+            self.env.render_mode = render_mode_bak
         # train agent
         print("Start training")
         history = {
@@ -192,7 +192,7 @@ class TD3Agent(agent.Agent):
             "steps": np.zeros(num_episodes, dtype=np.uint32),
         }
         for episode in range(num_episodes):
-            reward, steps, info = self.step()
+            reward, steps, info = self.step(num_steps=num_steps)
             history["rewards"][episode] = reward
             history["steps"][episode] = steps
             print(f"{episode}: {steps=} {reward=}")
@@ -234,7 +234,10 @@ class TD3AgentConfig:
     device = "cuda"
     buffer_size = 3200
     batch_size = 16
-    update_interval = 1
+    num_updates = 100
+    update_interval = 10
+    update_noise = 0.2
+    noise_clip = 0.5
     replay_buffer_prefill_size = 256
     replay_buffer_dir = pathlib.Path("/DATA1/mlinke/modelling-seminar/td3_buffer")
     embed_size = 2048
