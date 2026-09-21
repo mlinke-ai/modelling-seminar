@@ -14,6 +14,7 @@ import utils
 import tqdm
 import typing
 import math
+import datetime
 from agents import state_encoder
 from agents import agent
 
@@ -109,7 +110,7 @@ class SACAgent(agent.Agent):
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
-            lat = self.state_encoder.encode(obs.unsqueeze(0))
+            lat = self.state_encoder(obs.unsqueeze(0))
             action, _ = self.actor.sample(lat, probabilistic=probabilistic)
         return action.squeeze().numpy(force=True)
 
@@ -133,7 +134,7 @@ class SACAgent(agent.Agent):
         ), "Replay buffer is not sufficiently filled for sampling!"
         transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
         with torch.no_grad():
-            next_lat = self.state_encoder.encode(transitions["next_obs"])
+            next_lat = self.state_encoder(transitions["next_obs"])
             next_actions, next_log_probs = self.actor.sample(next_lat)
             q1_t = self.q1_target(next_lat, next_actions)
             q2_t = self.q2_target(next_lat, next_actions)
@@ -142,40 +143,35 @@ class SACAgent(agent.Agent):
 
         # update state encoder
         self.state_encoder_optimizer.zero_grad()
-        lat = self.state_encoder.encode(transitions["obs"])
-        lat_detached = lat.detach().clone()
-        obs_reconstructed = self.state_encoder.decode(lat)
-        state_encoder_loss = self.state_encoder.loss(obs_reconstructed, transitions["obs"])
-        state_encoder_loss.backward()
-        #print(f"{state_encoder_loss=}")
-        self.state_encoder_optimizer.step()
+        state_enc = self.state_encoder(transitions["obs"])
 
         # update critics
         self.q1_optimizer.zero_grad()
         self.q2_optimizer.zero_grad()
-        q1_c = self.q1_critic(lat_detached, transitions["actions"])
-        q2_c = self.q2_critic(lat_detached, transitions["actions"])
+        q1_c = self.q1_critic(state_enc.clone(), transitions["actions"])
+        q2_c = self.q2_critic(state_enc.clone(), transitions["actions"])
         q1_loss = F.mse_loss(q1_c, q_t)
         q2_loss = F.mse_loss(q2_c, q_t)
-        q1_loss.backward()
-        q2_loss.backward()
-        nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 1.0)
-        nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 1.0)
+        q1_loss.backward(retain_graph=True)
+        q2_loss.backward(retain_graph=True)
+        nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
+        nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
         self.q1_optimizer.step()
         self.q2_optimizer.step()
 
         # update actor
         self.actor_optimizer.zero_grad()
-        new_actions, new_log_probs = self.actor.sample(lat_detached)
-        a = new_actions.detach().clone()
+        new_actions, new_log_probs = self.actor.sample(state_enc.clone())
         with torch.no_grad():
-            new_q1_c = self.q1_critic(lat_detached, a)
-            new_q2_c = self.q2_critic(lat_detached, a)
+            new_q1_c = self.q1_critic(state_enc.clone(), new_actions.clone())
+            new_q2_c = self.q2_critic(state_enc.clone(), new_actions.clone())
             new_q_c = torch.min(new_q1_c, new_q2_c)
         actor_loss = (new_q_c - torch.unsqueeze(self.alpha * new_log_probs, -1)).mean()
         actor_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
         self.actor_optimizer.step()
+        nn.utils.clip_grad_norm_(self.state_encoder.parameters(), 5.0)
+        self.state_encoder_optimizer.step()
 
         # update entropy
         self.alpha_optimizer.zero_grad()
@@ -242,10 +238,12 @@ class SACAgent(agent.Agent):
             "steps": np.zeros(num_episodes, dtype=np.uint32),
         }
         for episode in range(num_episodes):
+            start_time = datetime.datetime.now()
             reward, steps, info = self.step(num_steps=num_steps)
+            end_time = datetime.datetime.now()
             history["rewards"][episode] = reward
             history["steps"][episode] = steps
-            print(f"{episode}: {steps=} {reward=}")
+            print(f"{episode}: {steps=} {reward=} (elapsed time: {end_time - start_time})")
         return history
 
     def evaluate(self):

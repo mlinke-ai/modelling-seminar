@@ -11,14 +11,14 @@ def main():
     #torch.cuda.memory._record_memory_history(max_entries=100000)
     env = envs.WallSimple()
     env.render_mode = None
-    #config = agents.SACAgentConfig()
-    config = agents.TD3AgentConfig()
+    config = agents.SACAgentConfig()
+    #config = agents.TD3AgentConfig()
 
-    #agent = agents.SACAgent(env, config)
-    agent = agents.TD3Agent(env, config)
+    agent = agents.SACAgent(env, config)
+    #agent = agents.TD3Agent(env, config)
     #agent.load()
     try:
-        history = agent.train(num_episodes=5)
+        history = agent.train(num_episodes=100, num_steps=100)
     except torch.OutOfMemoryError as e:
         print(e)
     finally:
