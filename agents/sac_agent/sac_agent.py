@@ -19,48 +19,55 @@ from agents import state_encoder
 from agents import agent
 
 class Actor(nn.Module):
-    def __init__(self, embed_size, action_size, max_action):
+    def __init__(self, latent_size, action_size, max_action):
         super(Actor, self).__init__()
 
-        self.l1 = nn.Linear(768, 512)
-        self.l2 = nn.Linear(512, 128)
-        self.mu = nn.Linear(128, 4)
-        self.sd = nn.Linear(128, 4)
+        self.l1 = nn.Linear(latent_size, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.mu = nn.Linear(256, action_size)
+        self.sd = nn.Linear(256, action_size)
 
         self.max_action = max_action
 
-    def forward(self, embed):
-        x = F.silu(self.l1(embed))
+    def forward(self, latent):
+        x = F.silu(self.l1(latent))
         x = F.silu(self.l2(x))
         mu = self.mu(x)
-        sd = F.softplus(self.sd(x)) + utils.SMALL
+        #sd = F.softplus(self.sd(x)) + utils.SMALL
+        sd = torch.clamp(self.sd(x), min=-20.0, max=2.0).exp()
         return mu, sd
 
-    def sample(self, embed, probabilistic=True):
-        mu, sd = self.forward(embed)
+    def sample(self, latent, probabilistic=True):
+        mu, sd = self.forward(latent)
         if probabilistic:
             normal_dist = dist.Normal(mu, sd)
             sample = normal_dist.rsample()
-            log_prob = normal_dist.log_prob(sample).sum(-1)
-            # log_prob -= torch.log(1.0 - action.pow(2) + utils.SMALL).sum(-1)
-            action = F.sigmoid(sample)
+            action = self.max_action * F.tanh(sample)
+            # --- in case of sigmoid
+            #action = self.max_action * F.sigmoid(sample)
+            #log_prob = normal_dist.log_prob(sample) - (sample - 2.0 * F.softplus(sample))
+            #log_prob = log_prob.sum(-1, keepdim=True)
+            # ---
+            #log_prob = normal_dist.log_prob(action)
+            #log_prob -= torch.log(1.0 - F.tanh(sample).pow(2.0) + utils.SMALL).sum(1, keepdim=True)
+            log_prob = normal_dist.log_prob(sample) - (2.0 * (np.log(2.0) - sample - F.softplus(-2.0 * sample)))
+            log_prob = log_prob.sum(-1, keepdim=True)
         else:
-            action = F.sigmoid(mu)
+            action = self.max_action * F.tanh(mu)
             log_prob = None
-        #action *= self.max_action
         return action, log_prob
 
 
 class Critic(nn.Module):
-    def __init__(self, embed_size, action_size):
+    def __init__(self, latent_size, action_size):
         super(Critic, self).__init__()
 
-        self.l1 = nn.Linear(772, 512)
-        self.l2 = nn.Linear(512, 128)
-        self.l3 = nn.Linear(128, 1)
+        self.l1 = nn.Linear(latent_size + action_size, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, 1)
 
-    def forward(self, embed, action):
-        x = torch.cat((embed, action), dim=-1)
+    def forward(self, latent, action):
+        x = torch.cat((latent, action), dim=-1)
         x = F.silu(self.l1(x))
         x = F.silu(self.l2(x))
         x = self.l3(x)
@@ -86,33 +93,28 @@ class SACAgent(agent.Agent):
         )  # prefetch: int (prefetch N batches), transform: Callable (convert uint8[0; 255] images to float32[0.0; 1.0])
 
         # Networks
-        self.state_encoder = state_encoder.StateEncoder().to(self.device)
-        self.actor = Actor(self.config.embed_size, self.config.action_size, self.config.max_action).to(self.device)
-        self.q1_critic = Critic(self.config.embed_size, self.config.action_size).to(self.device)
-        self.q2_critic = Critic(self.config.embed_size, self.config.action_size).to(self.device)
-        self.q1_target = Critic(self.config.embed_size, self.config.action_size).to(self.device)
-        self.q2_target = Critic(self.config.embed_size, self.config.action_size).to(self.device)
+        self.actor = Actor(self.config.latent_size, self.config.action_size, self.config.max_action).to(self.device)
+        self.q1_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
+        self.q2_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
+        self.q1_target = Critic(self.config.latent_size, self.config.action_size).to(self.device)
+        self.q2_target = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q1_target.load_state_dict(self.q1_critic.state_dict())
         self.q2_target.load_state_dict(self.q2_critic.state_dict())
 
         # Optimizers
-        self.state_encoder_optimizer = optim.SGD(
-            self.state_encoder.parameters(), lr=self.config.state_encoder_lr
-        )
-        self.actor_optimizer = optim.SGD(self.actor.parameters(), lr=self.config.actor_lr, maximize=True)
-        self.q1_optimizer = optim.SGD(self.q1_critic.parameters(), lr=self.config.critic_lr)
-        self.q2_optimizer = optim.SGD(self.q2_critic.parameters(), lr=self.config.critic_lr)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.config.actor_lr)
+        self.q1_optimizer = optim.Adam(self.q1_critic.parameters(), lr=self.config.critic_lr)
+        self.q2_optimizer = optim.Adam(self.q2_critic.parameters(), lr=self.config.critic_lr)
 
         # Entropy coefficient
-        self.target_entropy = float(-self.config.action_size)
-        self.alpha = torch.tensor(self.config.alpha_init, dtype=torch.float32, requires_grad=True, device=self.device)
-        self.alpha_optimizer = optim.SGD([self.alpha], lr=self.config.alpha_lr)
+        self.target_entropy = -torch.prod(torch.tensor(self.env.action_space.shape)).item()
+        self.alpha = torch.tensor(np.log(self.config.alpha_init), dtype=torch.float32, requires_grad=True, device=self.device)
+        self.alpha_optimizer = optim.Adam([self.alpha], lr=self.config.alpha_lr)
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
-            lat = self.state_encoder(obs.unsqueeze(0))
-            action, _ = self.actor.sample(lat, probabilistic=probabilistic)
-        return action.squeeze().numpy(force=True)
+            action, _ = self.actor.sample(obs.unsqueeze(0), probabilistic=probabilistic)
+        return action.squeeze(0).numpy(force=True)
 
     def soft_update(self):
         for (
@@ -132,55 +134,62 @@ class SACAgent(agent.Agent):
         assert (
             self.config.batch_size <= self.replay_buffer.write_count
         ), "Replay buffer is not sufficiently filled for sampling!"
-        transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
-        with torch.no_grad():
-            next_lat = self.state_encoder(transitions["next_obs"])
-            next_actions, next_log_probs = self.actor.sample(next_lat)
-            q1_t = self.q1_target(next_lat, next_actions)
-            q2_t = self.q2_target(next_lat, next_actions)
-            q_t = torch.min(q1_t, q2_t) - torch.unsqueeze(self.alpha * next_log_probs, -1)
-            q_t = transitions["rewards"] + (1.0 - transitions["dones"]) * self.config.gamma * q_t
+        for _ in range(self.config.num_updates):
+            transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
+            with torch.no_grad():
+                next_actions, next_log_probs = self.actor.sample(transitions["next_obs"])
+                q1_t = self.q1_target(transitions["next_obs"], next_actions)
+                q2_t = self.q2_target(transitions["next_obs"], next_actions)
+                q_t = torch.min(q1_t, q2_t) - self.alpha.exp() * next_log_probs
+                q_t = self.config.reward_scale * transitions["rewards"] + (1.0 - transitions["dones"]) * self.config.gamma * q_t
 
-        # update state encoder
-        self.state_encoder_optimizer.zero_grad()
-        state_enc = self.state_encoder(transitions["obs"])
+            # update critics
+            self.q1_optimizer.zero_grad()
+            self.q2_optimizer.zero_grad()
+            q1_c = self.q1_critic(transitions["obs"], transitions["actions"])
+            q2_c = self.q2_critic(transitions["obs"], transitions["actions"])
+            q1_loss = F.mse_loss(q1_c, q_t)
+            q2_loss = F.mse_loss(q2_c, q_t)
+            #print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
+            #print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
+            (q1_loss + q2_loss).backward()
+            #nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
+            #nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
+            self.q1_optimizer.step()
+            self.q2_optimizer.step()
 
-        # update critics
-        self.q1_optimizer.zero_grad()
-        self.q2_optimizer.zero_grad()
-        q1_c = self.q1_critic(state_enc.clone(), transitions["actions"])
-        q2_c = self.q2_critic(state_enc.clone(), transitions["actions"])
-        q1_loss = F.mse_loss(q1_c, q_t)
-        q2_loss = F.mse_loss(q2_c, q_t)
-        q1_loss.backward(retain_graph=True)
-        q2_loss.backward(retain_graph=True)
-        nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
-        nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
-        self.q1_optimizer.step()
-        self.q2_optimizer.step()
-
-        # update actor
-        self.actor_optimizer.zero_grad()
-        new_actions, new_log_probs = self.actor.sample(state_enc.clone())
-        with torch.no_grad():
-            new_q1_c = self.q1_critic(state_enc.clone(), new_actions.clone())
-            new_q2_c = self.q2_critic(state_enc.clone(), new_actions.clone())
+            # update actor
+            for p in self.q1_critic.parameters():
+                p.requires_grad_(False)
+            for p in self.q2_critic.parameters():
+                p.requires_grad_(False)
+            self.actor_optimizer.zero_grad()
+            new_actions, new_log_probs = self.actor.sample(transitions["obs"])
+            new_q1_c = self.q1_critic(transitions["obs"], new_actions)
+            new_q2_c = self.q2_critic(transitions["obs"], new_actions)
             new_q_c = torch.min(new_q1_c, new_q2_c)
-        actor_loss = (new_q_c - torch.unsqueeze(self.alpha * new_log_probs, -1)).mean()
-        actor_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
-        self.actor_optimizer.step()
-        nn.utils.clip_grad_norm_(self.state_encoder.parameters(), 5.0)
-        self.state_encoder_optimizer.step()
+            #actor_loss = (new_q_c - torch.unsqueeze(self.alpha.exp() * new_log_probs, -1)).mean()
+            actor_loss = (self.alpha.exp().detach() * new_log_probs - new_q_c).mean()
+            #print(f"new_log_probs=[{new_log_probs.min().item()}; {new_log_probs.max().item()}]")
+            #print(f"actor_loss={actor_loss.item()}")
+            actor_loss.backward()
+            #nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
+            self.actor_optimizer.step()
+            for p in self.q1_critic.parameters():
+                p.requires_grad_(True)
+            for p in self.q2_critic.parameters():
+                p.requires_grad_(True)
 
-        # update entropy
-        self.alpha_optimizer.zero_grad()
-        alpha_loss = -(self.alpha * (new_log_probs + self.target_entropy).detach()).mean()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
+            # update entropy
+            self.alpha_optimizer.zero_grad()
+            alpha_loss = -(self.alpha.exp() * (new_log_probs + self.target_entropy).detach()).mean()
+            #print(f"alpha={self.alpha.exp().item()}")
+            #print(f"alpha_loss={alpha_loss.item()}")
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
 
-        # update targets
-        self.soft_update()
+            # update targets
+            self.soft_update()
 
     def step(self, num_steps=0, evaluate=False):
         done = False
@@ -188,7 +197,7 @@ class SACAgent(agent.Agent):
         episode_reward = 0.0
         obs, _ = self.env.reset()
         while not done:
-            obs = obs.to(self.device)
+            obs = torch.tensor(obs).to(self.device)
             action = self.select_action(obs, probabilistic=not evaluate)
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
@@ -218,8 +227,6 @@ class SACAgent(agent.Agent):
         # prefill replay buffer
         missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
         if missing > 0:
-            render_mode_bak = self.env.render_mode
-            self.env.render_mode = None
             obs, _ = self.env.reset()
             for _ in tqdm.tqdm(range(missing)):
                 action = self.env.action_space.sample()
@@ -230,7 +237,6 @@ class SACAgent(agent.Agent):
                     obs, _ = self.env.reset()
                 else:
                     obs = next_obs
-            self.env.render_mode = render_mode_bak
         # train agent
         print("Start training")
         history = {
@@ -241,7 +247,7 @@ class SACAgent(agent.Agent):
             start_time = datetime.datetime.now()
             reward, steps, info = self.step(num_steps=num_steps)
             end_time = datetime.datetime.now()
-            history["rewards"][episode] = reward
+            history["rewards"][episode] = reward.astype(np.float32)
             history["steps"][episode] = steps
             print(f"{episode}: {steps=} {reward=} (elapsed time: {end_time - start_time})")
         return history
@@ -252,12 +258,10 @@ class SACAgent(agent.Agent):
     def save(self, file=None):
         file = pathlib.Path(file if file is not None else self.config.save_file).resolve()
         checkpoint = dict(
-            state_encoder=self.state_encoder.state_dict(),
             actor=self.actor.state_dict(),
             q1_critic=self.q1_critic.state_dict(),
             q2_critic=self.q2_critic.state_dict(),
             alpha=self.alpha,
-            state_encoder_optimizer=self.state_encoder_optimizer.state_dict(),
             actor_optimizer=self.actor_optimizer.state_dict(),
             q1_optimizer=self.q1_optimizer.state_dict(),
             q2_optimizer=self.q2_optimizer.state_dict(),
@@ -268,14 +272,12 @@ class SACAgent(agent.Agent):
     def load(self, file=None):
         file = pathlib.Path(file if file is not None else self.config.save_file).resolve()
         checkpoint = torch.load(file)
-        self.state_encoder.load_state_dict(checkpoint["state_encoder"])
         self.actor.load_state_dict(checkpoint["actor"])
         self.q1_critic.load_state_dict(checkpoint["q1_critic"])
         self.q1_target.load_state_dict(checkpoint["q1_critic"])
         self.q2_critic.load_state_dict(checkpoint["q2_critic"])
         self.q2_target.load_state_dict(checkpoint["q2_critic"])
         self.alpha = checkpoint["alpha"]
-        self.state_encoder_optimizer.load_state_dict(checkpoint["state_encoder_optimizer"])
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.q1_optimizer.load_state_dict(checkpoint["q1_optimizer"])
         self.q2_optimizer.load_state_dict(checkpoint["q2_optimizer"])
@@ -284,19 +286,20 @@ class SACAgent(agent.Agent):
 
 class SACAgentConfig:
     device = "cuda"
-    buffer_size = 3200
-    batch_size = 16
+    buffer_size = 1000000
+    batch_size = 256
     update_interval = 1
+    num_updates = 1
     replay_buffer_prefill_size = 256
     replay_buffer_dir = pathlib.Path("/DATA1/mlinke/modelling-seminar/sac_buffer")
-    embed_size = 2048
-    action_size = 4
-    max_action = 13.0
+    latent_size = 3
+    action_size = 1
+    max_action = 2.0
     tau = 0.995
     gamma = 0.99
+    reward_scale = 0.01
     alpha_init = 0.2
-    state_encoder_lr = 0.001
-    actor_lr = 0.001
-    critic_lr = 0.001
-    alpha_lr = 0.001
+    actor_lr = 3e-4
+    critic_lr = 3e-4
+    alpha_lr = 3e-4
     save_file = pathlib.Path("./chkpts/sac_agent").resolve()
