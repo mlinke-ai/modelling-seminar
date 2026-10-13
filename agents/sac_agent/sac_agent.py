@@ -19,7 +19,7 @@ from agents import state_encoder
 from agents import agent
 
 class Actor(nn.Module):
-    def __init__(self, latent_size, action_size, max_action):
+    def __init__(self, latent_size, action_size, min_action, max_action):
         super(Actor, self).__init__()
 
         self.l1 = nn.Linear(latent_size, 256)
@@ -27,22 +27,24 @@ class Actor(nn.Module):
         self.mu = nn.Linear(256, action_size)
         self.sd = nn.Linear(256, action_size)
 
+        self.min_action = min_action
         self.max_action = max_action
+
+        self.dist_transforms = [dist.transforms.SigmoidTransform(cache_size=1), dist.transforms.AffineTransform(loc=min_action, scale=max_action - min_action, event_dim=1, cache_size=1)]
 
     def forward(self, latent):
         x = F.silu(self.l1(latent))
         x = F.silu(self.l2(x))
         mu = self.mu(x)
-        #sd = F.softplus(self.sd(x)) + utils.SMALL
         sd = torch.clamp(self.sd(x), min=-20.0, max=2.0).exp()
         return mu, sd
 
     def sample(self, latent, probabilistic=True):
         mu, sd = self.forward(latent)
         if probabilistic:
-            normal_dist = dist.Normal(mu, sd)
-            sample = normal_dist.rsample()
-            action = self.max_action * F.tanh(sample)
+            #normal_dist = dist.Normal(mu, sd)
+            #sample = normal_dist.rsample()
+            #action = self.max_action * F.tanh(sample)
             # --- in case of sigmoid
             #action = self.max_action * F.sigmoid(sample)
             #log_prob = normal_dist.log_prob(sample) - (sample - 2.0 * F.softplus(sample))
@@ -50,10 +52,13 @@ class Actor(nn.Module):
             # ---
             #log_prob = normal_dist.log_prob(action)
             #log_prob -= torch.log(1.0 - F.tanh(sample).pow(2.0) + utils.SMALL).sum(1, keepdim=True)
-            log_prob = normal_dist.log_prob(sample) - (2.0 * (np.log(2.0) - sample - F.softplus(-2.0 * sample)))
-            log_prob = log_prob.sum(-1, keepdim=True)
+            #log_prob = normal_dist.log_prob(sample) - (2.0 * (np.log(2.0) - sample - F.softplus(-2.0 * sample)))
+            #log_prob = log_prob.sum(-1, keepdim=True)
+            policy_dist = dist.TransformedDistribution(dist.Normal(mu, sd), self.dist_transforms)
+            action = policy_dist.rsample()
+            log_prob = policy_dist.log_prob(action).unsqueeze(-1)
         else:
-            action = self.max_action * F.tanh(mu)
+            action = self.min_action + (self.max_action - self.min_action) * F.sigmoid(mu)
             log_prob = None
         return action, log_prob
 
@@ -93,7 +98,7 @@ class SACAgent(agent.Agent):
         )  # prefetch: int (prefetch N batches), transform: Callable (convert uint8[0; 255] images to float32[0.0; 1.0])
 
         # Networks
-        self.actor = Actor(self.config.latent_size, self.config.action_size, self.config.max_action).to(self.device)
+        self.actor = Actor(self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action).to(self.device)
         self.q1_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q2_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q1_target = Critic(self.config.latent_size, self.config.action_size).to(self.device)
@@ -107,7 +112,7 @@ class SACAgent(agent.Agent):
         self.q2_optimizer = optim.Adam(self.q2_critic.parameters(), lr=self.config.critic_lr)
 
         # Entropy coefficient
-        self.target_entropy = -torch.prod(torch.tensor(self.env.action_space.shape)).item()
+        self.target_entropy = -torch.prod(torch.tensor(self.env.action_space.shape), dtype=torch.float32).item()
         self.alpha = torch.tensor(np.log(self.config.alpha_init), dtype=torch.float32, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.alpha], lr=self.config.alpha_lr)
 
@@ -191,7 +196,7 @@ class SACAgent(agent.Agent):
             # update targets
             self.soft_update()
 
-    def step(self, num_steps=0, evaluate=False):
+    def step(self, evaluate=False):
         done = False
         episode_steps = 0
         episode_reward = 0.0
@@ -202,15 +207,11 @@ class SACAgent(agent.Agent):
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             if not evaluate:
-                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
+                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, terminated))
                 self.update()
             episode_reward += reward
             episode_steps += 1
-            if episode_steps < num_steps and done:
-                obs, _ = self.env.reset()
-                done = False
-            else:
-                obs = next_obs
+            obs = next_obs
         return episode_reward, episode_steps, info
 
     def _to_tensordict(self, obs, action, reward, next_obs, done):
@@ -223,7 +224,7 @@ class SACAgent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, num_episodes, num_steps=0):
+    def train(self, train_episodes, eval_episodes=10, eval_interval=10):
         # prefill replay buffer
         missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
         if missing > 0:
@@ -232,7 +233,7 @@ class SACAgent(agent.Agent):
                 action = self.env.action_space.sample()
                 next_obs, reward, terminated, truncated, _ = self.env.step(action)
                 done = terminated or truncated
-                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
+                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, terminated))
                 if done:
                     obs, _ = self.env.reset()
                 else:
@@ -240,20 +241,30 @@ class SACAgent(agent.Agent):
         # train agent
         print("Start training")
         history = {
-            "rewards": np.zeros(num_episodes, dtype=np.float32),
-            "steps": np.zeros(num_episodes, dtype=np.uint32),
+            "rewards": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.float32),
+            "steps": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.uint32),
         }
-        for episode in range(num_episodes):
+        idx = 0
+        for train_episode in range(train_episodes):
             start_time = datetime.datetime.now()
-            reward, steps, info = self.step(num_steps=num_steps)
+            train_reward, train_steps, _ = self.step()
+            if (train_episode + 1) % eval_interval == 0:
+                for eval_episode in range(eval_episodes):
+                    eval_reward, eval_steps, _ = self.evaluate()
+                    history["rewards"][idx] = eval_reward.astype(np.float32)
+                    history["steps"][idx] = eval_steps
+                    idx += 1
             end_time = datetime.datetime.now()
-            history["rewards"][episode] = reward.astype(np.float32)
-            history["steps"][episode] = steps
-            print(f"{episode}: {steps=} {reward=} (elapsed time: {end_time - start_time})")
+            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})")
+        for eval_episode in range(eval_episodes):
+            eval_reward, eval_steps, _ = self.evaluate()
+            history["rewards"][idx] = eval_reward.astype(np.float32)
+            history["steps"][idx] = eval_steps
+            idx += 1
         return history
 
     def evaluate(self):
-        reward, steps, info = self.step(evaluate=True)
+        return self.step(evaluate=True)
 
     def save(self, file=None):
         file = pathlib.Path(file if file is not None else self.config.save_file).resolve()
@@ -294,6 +305,7 @@ class SACAgentConfig:
     replay_buffer_dir = pathlib.Path("/DATA1/mlinke/modelling-seminar/sac_buffer")
     latent_size = 3
     action_size = 1
+    min_action = -2.0
     max_action = 2.0
     tau = 0.995
     gamma = 0.99

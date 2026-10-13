@@ -15,19 +15,20 @@ from agents import agent
 import utils
 
 class Actor(nn.Module):
-    def __init__(self, latent_size, action_size, max_action):
+    def __init__(self, latent_size, action_size, min_action, max_action):
         super(Actor, self).__init__()
 
         self.l1 = nn.Linear(latent_size, 256)
         self.l2 = nn.Linear(256, 256)
         self.l3 = nn.Linear(256, action_size)
 
+        self.min_action = min_action
         self.max_action = max_action
 
     def forward(self, latent):
         x = F.silu(self.l1(latent))
         x = F.silu(self.l2(x))
-        x = self.max_action * F.tanh(self.l3(x))
+        x = self.min_action + (self.max_action - self.min_action) * F.sigmoid(self.l3(x))
         return x
 
 class Critic(nn.Module):
@@ -59,8 +60,8 @@ class TD3Agent(agent.Agent):
         self.replay_buffer = data.TensorDictReplayBuffer(storage=data.replay_buffers.LazyMemmapStorage(max_size=self.config.buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True), batch_size=self.config.batch_size)
 
         # Networks
-        self.p_actor = Actor(self.config.latent_size, self.config.action_size, self.config.max_action).to(self.device)
-        self.p_target = Actor(self.config.latent_size, self.config.action_size, self.config.max_action).to(self.device)
+        self.p_actor = Actor(self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action).to(self.device)
+        self.p_target = Actor(self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action).to(self.device)
         self.q1_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q2_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q1_target = Critic(self.config.latent_size, self.config.action_size).to(self.device)
@@ -78,7 +79,7 @@ class TD3Agent(agent.Agent):
         with torch.no_grad():
             action = self.p_actor(obs.unsqueeze(0))
             e = torch.randn_like(action) if probabilistic else 0.0
-            action = torch.clip(action + e, -1.0, 1.0)
+            action = torch.clip(action + e, -self.config.max_action, self.config.max_action)
         return action.squeeze(0).numpy(force=True)
 
     def soft_update(self):
@@ -99,7 +100,7 @@ class TD3Agent(agent.Agent):
             with torch.no_grad():
                 next_samples = self.p_target(transitions["next_obs"])
                 e = torch.clip(torch.randn_like(next_samples) * self.config.update_noise, -self.config.noise_clip, self.config.noise_clip)
-                next_actions = torch.clip(next_samples + e, -1.0, 1.0)
+                next_actions = torch.clip(next_samples + e, -self.config.max_action, self.config.max_action)
                 q1_t = self.q1_target(transitions["next_obs"], next_actions)
                 q2_t = self.q2_target(transitions["next_obs"], next_actions)
                 q_t = torch.min(q1_t, q2_t)
@@ -121,17 +122,21 @@ class TD3Agent(agent.Agent):
             self.q2_optimizer.step()
 
             if (j + 1) % self.config.update_interval == 0:
+                for p in self.q1_critic.parameters():
+                    p.requires_grad_(False)
                 self.p_optimizer.zero_grad()
                 actions = self.p_actor(transitions["obs"])
                 q_c = self.q1_critic(transitions["obs"], actions)
-                p_loss = q_c.mean()
+                p_loss = -q_c.mean()
                 #print(f"p_loss={p_loss.item()}")
                 p_loss.backward()
-                self.p_optimizer.step()
                 #nn.utils.clip_grad_norm_(self.p_actor.parameters(), 5.0)
+                self.p_optimizer.step()
+                for p in self.q1_critic.parameters():
+                    p.requires_grad_(True)
                 self.soft_update()
 
-    def step(self, num_steps=0, evaluate=False):
+    def step(self, evaluate=False):
         done = False
         episode_steps = 0
         episode_reward = 0.0
@@ -142,15 +147,11 @@ class TD3Agent(agent.Agent):
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             if not evaluate:
-                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
+                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, terminated))
                 self.update()
             episode_reward += reward
             episode_steps += 1
-            if episode_steps < num_steps and done:
-                obs, _ = self.env.reset()
-                done = False
-            else:
-                obs = next_obs
+            obs = next_obs
         return episode_reward, episode_steps, info
 
     def _to_tensordict(self, obs, action, reward, next_obs, done):
@@ -163,7 +164,7 @@ class TD3Agent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, num_episodes, num_steps=0):
+    def train(self, train_episodes, eval_episodes=10, eval_interval=10):
         # prefill replay buffer
         missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
         if missing > 0:
@@ -172,7 +173,7 @@ class TD3Agent(agent.Agent):
                 action = self.env.action_space.sample()
                 next_obs, reward, terminated, truncated, _ = self.env.step(action)
                 done = terminated or truncated
-                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, done))
+                self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, terminated))
                 if done:
                     obs, _  = self.env.reset()
                 else:
@@ -180,20 +181,30 @@ class TD3Agent(agent.Agent):
         # train agent
         print("Start training")
         history = {
-            "rewards": np.zeros(num_episodes, dtype=np.float32),
-            "steps": np.zeros(num_episodes, dtype=np.uint32),
+            "rewards": np.zeros(eval_episodes * (train_episodes // eval_episodes + 1), dtype=np.float32),
+            "steps": np.zeros(eval_episodes * (train_episodes // eval_episodes + 1), dtype=np.uint32),
         }
-        for episode in range(num_episodes):
+        idx = 0
+        for train_episode in range(train_episodes):
             start_time = datetime.datetime.now()
-            reward, steps, info = self.step(num_steps=num_steps)
+            train_reward, train_steps, _ = self.step()
+            if (train_episode + 1) % eval_interval == 0:
+                for eval_episode in range(eval_episodes):
+                    eval_reward, eval_steps, _ = self.evaluate()
+                    history["rewards"][idx] = eval_reward.astype(np.float32)
+                    history["steps"][idx] = eval_steps
+                    idx += 1
             end_time = datetime.datetime.now()
-            history["rewards"][episode] = reward.astype(np.float32)
-            history["steps"][episode] = steps
-            print(f"{episode}: {steps=} {reward=} (elapsed time: {end_time - start_time})")
+            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})")
+        for eval_episode in range(eval_episodes):
+            eval_reward, eval_steps, _ = self.evaluate()
+            history["rewards"][idx] = eval_reward.astype(np.float32)
+            history["steps"][idx] = eval_steps
+            idx += 1
         return history
 
     def evaluate(self):
-        reward, steps, info = self.step(evaluate=True)
+        return self.step(evaluate=True)
 
     def save(self, file=None):
         file = pathlib.Path(file if file is not None else self.config.save_file).resolve()
@@ -224,14 +235,15 @@ class TD3AgentConfig:
     device = "cuda"
     buffer_size = 1000000
     batch_size = 256
-    num_updates = 100
-    update_interval = 10
-    update_noise = 0.2
+    num_updates = 2
+    update_interval = 2
+    update_noise = 0.1
     noise_clip = 0.5
     replay_buffer_prefill_size = 256
     replay_buffer_dir = pathlib.Path("/DATA1/mlinke/modelling-seminar/td3_buffer")
     latent_size = 3
     action_size = 1
+    min_action = -2.0
     max_action = 2.0
     tau = 0.995
     gamma = 0.99
