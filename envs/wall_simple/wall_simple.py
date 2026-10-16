@@ -37,7 +37,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         healthy_y_range: tuple[float, float] = (-1.5, 1.5),
         healthy_z_range: tuple[float, float] = (0.1, 5.0),
         healthy_cosz_range: tuple[float, float] = (0.7, 1.0),
-        min_wp_distance: float = 0.1,
+        min_wpt_distance: float = 0.1,
         reset_noise_scale: float = 0.1,
         **kwargs
     ):
@@ -66,7 +66,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             healthy_y_range,
             healthy_z_range,
             healthy_cosz_range,
-            min_wp_distance,
+            min_wpt_distance,
             reset_noise_scale,
             **kwargs
         )
@@ -88,10 +88,13 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._waypoint_body = waypoint_body
         self._max_action = max(action_range)
 
-        self._min_wp_distance = min_wp_distance
-        wp_positions = [(0, 0, 0.2), (8, 0, 0.2)]
-        self._wp_positions = map(functools.partial(np.array, dtype=np.float32), wp_positions)
-        self._wp_position = next(self._wp_positions)
+        self._min_wpt_distance = min_wpt_distance
+        wpt_positions = [(0, 0, 0.2), (8, 0, 0.2)]
+        self._wpt_positions = map(functools.partial(np.array, dtype=np.float32), wpt_positions)
+        self._wpt_position = next(self._wpt_positions)
+        self._wpt_dist_cost_scale = 0.1
+        self._unhealthy_cost = 10.0
+        self._action_cost_scale = 1.0
 
         self._reset_noise_scale = reset_noise_scale
 
@@ -111,35 +114,19 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             "render_fps": int(np.round(1.0 / self.dt)),
         }
 
-        self.observation_space = gym_spaces.Dict(
-            {
-                "image": gym_spaces.Box(
-                    low=0,
-                    high=255,
-                    shape=(3, drone_camera_config["height"], drone_camera_config["width"]),
-                    dtype=np.uint8,
-                ),
-                "depth": gym_spaces.Box(
-                    low=0.0,
-                    high=np.inf,
-                    shape=(drone_camera_config["height"], drone_camera_config["width"]),
-                    dtype=np.float32,
-                ),
-                "gyro": gym_spaces.Box(low=-np.pi, high=np.pi, shape=(3,), dtype=np.float32),
-                "accel": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-                "velo": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-                "pos": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-                "ori": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-                "tilt": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-                "wp_dir": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-                "wp_dist": gym_spaces.Box(low=0.0, high=np.inf, shape=(1,), dtype=np.float32),
-            }
+        self.observation_space = gym_spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(16, drone_camera_config["height"], drone_camera_config["width"]),
+            dtype=np.float32,
         )
-        self.action_space = gym_spaces.Box(
-            low=0.0, high=1.0, shape=action_shape, dtype=np.float32
-        )
+        self.action_space = gym_spaces.Box(low=0.0, high=13.0, shape=action_shape, dtype=np.float32)
 
         self.mj_renderer = gym_mujoco.MujocoRenderer(self.model, self.data, **drone_camera_config)
+        self._image_before = np.empty(
+            (4, drone_camera_config["height"], drone_camera_config["width"]), dtype=np.float32
+        )
+        self._image_after = np.empty_like(self._image_before)
 
     @property
     def is_x_healthy(self):
@@ -193,78 +180,71 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         }
         return is_healthy, health_info
 
+    def _get_rgbd_img(self):
+        rgb_img, dep_img = self.mj_renderer.render(render_mode="rgbd_tuple")
+        rgb_img = np.moveaxis(rgb_img, -1, 0)
+        dep_img = np.expand_dims(dep_img, 0)
+        return np.concat((rgb_img, dep_img), axis=0)
+
     def _get_obs(self):
-        image, depth = self.mj_renderer.render(render_mode="rgbd_tuple")
-        image = np.moveaxis(image, -1, 0)
-        depth = np.expand_dims(depth, 0)
-        gyro = self.data.sensor("gyro").data.copy()
-        acceleration = self.data.sensor("acceleration").data.copy()
-        velocity = self.data.sensor("velocity").data.copy()
-        position = self.data.sensor("position").data.copy()
-        orientation = self.data.sensor("orientation").data.copy()
-        tilting = self.data.sensor("tilting").data.copy()
-        wp_direction = self._wp_position - position
-        wp_distance = np.linalg.norm(wp_direction, ord=2)
-        wp_direction /= wp_distance
+        ang_pos = self.data.sensor("ang_pos").data.copy()  # framequat
+        ang_vel = self.data.sensor("ang_vel").data.copy()  # gyro
+        lin_pos = self.data.sensor("lin_pos").data.copy()  # framepos
+        lin_vel = self.data.sensor("lin_vel").data.copy()  # velocimeter
+        lin_acc = self.data.sensor("lin_acc").data.copy()  # accelerometer
+        wpt_dir = self._wpt_position - lin_pos
+        wpt_dis = np.linalg.norm(wpt_dir, ord=2)
+        wpt_dir /= wpt_dis
+        aux_dat = np.concat((ang_pos, ang_vel, lin_pos, lin_vel, lin_acc, wpt_dir), axis=0)
+        obs = np.concat(
+            (
+                self._image_before,
+                self._image_after,
+                np.full(aux_dat.shape + self._image_before.shape[1:], aux_dat.reshape(-1, 1, 1)),
+            ),
+            axis=0,
+        )
+        return obs
 
-        return tensordict.TensorDict({
-            "image": image.astype(np.float32) / 255.0,
-            "depth": depth.astype(np.float32),
-            "gyro": gyro.astype(np.float32),
-            "accel": acceleration.astype(np.float32),
-            "velo": velocity.astype(np.float32),
-            "pos": position.astype(np.float32),
-            "ori": orientation.astype(np.float32),
-            "tilt": tilting.astype(np.float32),
-            "wp_dir": wp_direction.astype(np.float32),
-            "wp_dist": np.expand_dims(wp_distance, 0).astype(np.float32),
-        })
-
-    def _get_reward(self, action: np.array, wp_alignment: np.array, terminated: bool, truncated: bool):
+    def _get_reward(self, action: np.array, wpt_dist: float, terminated: bool, truncated: bool):
         reward = 0.0
-        healthy_reward = 0.0 if terminated or truncated else self._healthy_reward
-        reward += healthy_reward
-        truncation_reward = self._truncation_reward if truncated else 0.0
-        reward += truncation_reward
-        wp_reward = wp_alignment * self._waypoint_reward
-        reward += wp_reward
-        #action_cost = np.linalg.norm(action, ord=2) * (self._healthy_reward / 2.0)
-        action_cost = 0.0
-        reward -= action_cost
-        termination_cost = self._termination_cost if terminated else 0.0
-        reward -= termination_cost
-        reward_info = {"reward": reward, "healthy_reward": healthy_reward, "truncation_reward": truncation_reward, "wp_reward": wp_reward, "action_cost": action_cost, "termination_cost": termination_cost}
+        reward -= self._wpt_dist_cost_scale * np.sqrt(wpt_dist)
+        reward -= self._unhealthy_cost if terminated else 0.0
+        reward -= self._action_cost_scale * np.linalg.norm(action, ord=2)
+        reward_info = dict()
         return reward, reward_info
 
     def step(self, action: np.array):
         position_before = self.data.body(self._drone_body).xpos[:3].copy()
-        self.do_simulation(action * self._max_action, self.frame_skip)
+        self._image_before = self._image_after.copy()
+        self.do_simulation(action, self.frame_skip)
         position_after = self.data.body(self._drone_body).xpos[:3].copy()
+        self._image_after = self._get_rgbd_img()
 
-        #velocity = np.linalg.norm(position_after - position_before, ord=2) / self.dt
+        velocity = np.linalg.norm(position_after - position_before, ord=2) / self.dt
 
         obs = self._get_obs()
 
         terminated = False
         truncated = False
 
-        if obs["wp_dist"] < self._min_wp_distance:
+        wpt_dist = np.linalg.norm(self._wpt_position - position_after, ord=2)
+
+        if wpt_dist < self._min_wpt_distance:
             try:
-                self._wp_position = next(self._wp_positions)
+                self._wpt_position = next(self._wpt_positions)
             except StopIteration:
                 truncated = True
 
         is_healthy, health_info = self.is_healthy
         terminated = (not is_healthy) and self._terminate_when_unhealthy
-        velocity = np.squeeze(obs["velo"]) / np.linalg.norm(obs["velo"], ord=2)
-        wp_direction = np.squeeze(obs["wp_dir"]) / np.linalg.norm(obs["wp_dir"], ord=2)
-        wp_alignment = np.dot(velocity, wp_direction)
-        reward, reward_info = self._get_reward(action, wp_alignment, terminated, truncated)
+        reward, reward_info = self._get_reward(action, wpt_dist, terminated, truncated)
 
         info = {
-            "position": self.data.body(self._drone_body).xpos[:3].copy(),
+            "position_before": position_before,
+            "position_after": position_after,
             "velocity": velocity,
-            "action": action * self._max_action,
+            "action": action,
             **health_info,
             **reward_info,
         }
@@ -282,6 +262,8 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         qvel = self.init_qvel + self._reset_noise_scale * self.np_random.standard_normal(self.model.nv)
         self.set_state(qpos, qvel)
 
+        self._image_before = self._get_rgbd_img()
+        self._image_after = self._image_before.copy()
         obs = self._get_obs()
 
         return obs
