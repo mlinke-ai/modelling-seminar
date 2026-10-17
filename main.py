@@ -36,13 +36,19 @@ def main():
     finally:
         env.reset()
 
-    plt.plot(sac_history["rewards"], label="SAC")
-    plt.plot(td3_history["rewards"], label="TD3")
-    plt.legend()
-    plt.xlabel("Episodes")
-    plt.ylabel("Reward")
-    plt.title("Evaluation Rewards")
-    plt.savefig("plot.png")
+    fig, (rewards, steps) = plt.subplots(2, 1, sharex=True)
+    rewards.plot(sac_history["rewards"], label="SAC")
+    rewards.plot(td3_history["rewards"], label="TD3")
+    rewards.set_xlabel("Episodes")
+    rewards.set_ylabel("Reward")
+    rewards.legend()
+    steps.plot(sac_history["steps"], label="SAC")
+    steps.plot(td3_history["steps"], label="TD3")
+    steps.set_xlabel("Episodes")
+    steps.set_ylabel("Steps")
+    steps.legend()
+    fig.suptitle("Evaluation History")
+    fig.savefig("plot.png")
 
 
 if __name__ == "__main__":
