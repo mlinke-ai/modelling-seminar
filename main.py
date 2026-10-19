@@ -12,7 +12,8 @@ def main():
     torch.autograd.set_detect_anomaly(True)
     #torch.cuda.memory._record_memory_history(max_entries=100000)
 
-    env = gymnasium.make("Pendulum-v1")
+    #env = gymnasium.make("Pendulum-v1")
+    env = envs.WallSimple()
 
     sac_config = agents.SACAgentConfig()
     sac_agent = agents.SACAgent(env, sac_config)
