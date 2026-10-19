@@ -37,7 +37,7 @@ class StateEncoder(nn.Module):
         super(StateEncoder, self).__init__()
 
         self.encoder = nn.Sequential(
-            nn.Conv2d(26, 128, kernel_size=3, stride=3, padding=1),
+            nn.Conv2d(27, 128, kernel_size=3, stride=3, padding=1),
             nn.GroupNorm(16, 128),
             nn.SiLU(),
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=(3, 1)),
@@ -58,42 +58,4 @@ class StateEncoder(nn.Module):
         )
 
     def forward(self, obs):
-        packed = self.pack(obs)
-        encoded = self.encoder(packed)
-        return encoded
-
-    def pack(self, obs):
-        ndim = max(v.ndim for v in obs.values())
-        shape = np.zeros(ndim, dtype=np.int64)
-        batch_dims = len(obs.batch_size)
-        for k in obs.keys():
-            s = np.array(obs[k].shape)
-            shape[:s.size] += s
-        shape[:batch_dims] = np.array(obs.batch_size)
-        shape = (*(obs.batch_size), 26, 540, 960)
-        packed = torch.zeros(shape, dtype=obs.dtype, device=obs.device)
-        packed[..., :3, :, :] = obs["image"]
-        packed[..., 3:4, :, :] = obs["depth"]
-        packed[..., 4:7, :, :] = obs["gyro"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 7:10, :, :] = obs["accel"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 10:13, :, :] = obs["velo"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 13:16, :, :] = obs["pos"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 16:19, :, :] = obs["ori"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 19:22, :, :] = obs["tilt"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 22:25, :, :] = obs["wp_dir"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        packed[..., 25:, :, :] = obs["wp_dist"][..., :, None, None].repeat(1, 1, *(shape[-2:]))
-        return packed
-
-    def loss(self, prediction, target):
-        loss = F.mse_loss(prediction["image"], target["image"])
-        loss += F.mse_loss(prediction["depth"], target["depth"])
-        loss += F.mse_loss(prediction["gyro"], target["gyro"])
-        loss += F.mse_loss(prediction["accel"], target["accel"])
-        loss += F.mse_loss(prediction["velo"], target["velo"])
-        loss += F.mse_loss(prediction["pos"], target["pos"])
-        loss += F.mse_loss(prediction["ori"], target["ori"])
-        loss += F.mse_loss(prediction["tilt"], target["tilt"])
-        loss += F.mse_loss(prediction["wp_dir"], target["wp_dir"])
-        loss += F.mse_loss(prediction["wp_dist"], target["wp_dist"])
-        return loss
-
+        return self.encoder(obs)

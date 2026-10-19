@@ -93,7 +93,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._wpt_positions = map(functools.partial(np.array, dtype=np.float32), wpt_positions)
         self._wpt_position = next(self._wpt_positions)
         self._wpt_dist_cost_scale = 0.1
-        self._unhealthy_cost = 10.0
+        self._unhealthy_cost = 100.0
         self._action_cost_scale = 1.0
 
         self._reset_noise_scale = reset_noise_scale
@@ -117,7 +117,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self.observation_space = gym_spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(16, drone_camera_config["height"], drone_camera_config["width"]),
+            shape=(27, drone_camera_config["height"], drone_camera_config["width"]),
             dtype=np.float32,
         )
         self.action_space = gym_spaces.Box(low=0.0, high=13.0, shape=action_shape, dtype=np.float32)
@@ -204,12 +204,13 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             ),
             axis=0,
         )
-        return obs
+        return obs.astype(np.float32)
 
     def _get_reward(self, action: np.array, wpt_dist: float, terminated: bool, truncated: bool):
         reward = 0.0
-        reward -= self._wpt_dist_cost_scale * np.sqrt(wpt_dist)
-        reward -= self._unhealthy_cost if terminated else 0.0
+        if not truncated:
+            reward -= self._wpt_dist_cost_scale * np.sqrt(wpt_dist)
+            reward -= self._unhealthy_cost if terminated else 0.0
         reward -= self._action_cost_scale * np.linalg.norm(action, ord=2)
         reward_info = dict()
         return reward, reward_info
