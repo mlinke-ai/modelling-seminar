@@ -8,7 +8,7 @@ import pathlib
 import tensordict
 
 DEFAULT_CAMERA_CONFIG = {"distance": 4.0}
-DRONE_CAMERA_CONFIG = {"width": 960, "height": 540, "camera_name": "depth_cam"}
+DRONE_CAMERA_CONFIG = {"width": 480, "height": 360, "camera_name": "depth_cam"}
 
 
 class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
@@ -92,9 +92,10 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         wpt_positions = [(0, 0, 0.2), (8, 0, 0.2)]
         self._wpt_positions = map(functools.partial(np.array, dtype=np.float32), wpt_positions)
         self._wpt_position = next(self._wpt_positions)
-        self._wpt_dist_cost_scale = 0.1
-        self._unhealthy_cost = 100.0
+        self._wpt_dist_cost_scale = 5.0
+        self._unhealthy_cost = 1000.0
         self._action_cost_scale = 1.0
+        self._total_action_cost = 0.0
 
         self._reset_noise_scale = reset_noise_scale
 
@@ -183,8 +184,8 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
     def _get_rgbd_img(self):
         rgb_img, dep_img = self.mj_renderer.render(render_mode="rgbd_tuple")
         rgb_img = np.moveaxis(rgb_img, -1, 0)
-        dep_img = np.expand_dims(dep_img, 0)
-        return np.concat((rgb_img, dep_img), axis=0)
+        dep_img = np.expand_dims(np.clip(dep_img, 0.0, 255.0), 0)
+        return np.concat((rgb_img, dep_img), axis=0).astype(np.uint8)
 
     def _get_obs(self):
         ang_pos = self.data.sensor("ang_pos").data.copy()  # framequat
@@ -195,23 +196,17 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         wpt_dir = self._wpt_position - lin_pos
         wpt_dis = np.linalg.norm(wpt_dir, ord=2)
         wpt_dir /= wpt_dis
-        aux_dat = np.concat((ang_pos, ang_vel, lin_pos, lin_vel, lin_acc, wpt_dir), axis=0)
-        obs = np.concat(
-            (
-                self._image_before,
-                self._image_after,
-                np.full(aux_dat.shape + self._image_before.shape[1:], aux_dat.reshape(-1, 1, 1)),
-            ),
-            axis=0,
-        )
-        return obs.astype(np.float32)
+        aux_dat = np.concat((ang_pos, ang_vel, lin_pos, lin_vel, lin_acc, wpt_dir), axis=0).astype(np.float32)
+        rgbd = np.concat((self._image_before, self._image_after), axis=0)
+        return tensordict.TensorDict(dict(rgbd=rgbd, aux_dat=aux_dat))
 
     def _get_reward(self, action: np.array, wpt_dist: float, terminated: bool, truncated: bool):
         reward = 0.0
-        if not truncated:
-            reward -= self._wpt_dist_cost_scale * np.sqrt(wpt_dist)
+        reward += self._wpt_dist_cost_scale * (1.0 / wpt_dist)
+        if truncated:
+            reward -= self._action_cost_scale * self._total_action_cost
+        else:
             reward -= self._unhealthy_cost if terminated else 0.0
-        reward -= self._action_cost_scale * np.linalg.norm(action, ord=2)
         reward_info = dict()
         return reward, reward_info
 
@@ -223,6 +218,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._image_after = self._get_rgbd_img()
 
         velocity = np.linalg.norm(position_after - position_before, ord=2) / self.dt
+        self._total_action_cost += np.linalg.norm(action, ord=2)
 
         obs = self._get_obs()
 
