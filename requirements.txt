@@ -6,4 +6,5 @@ numpy
 tensordict
 torch
 torchrl
+torchvision
 tqdm
