@@ -25,4 +25,3 @@ class Agent:
 
     def load(self, file=None):
         raise NotImplementedError()
-

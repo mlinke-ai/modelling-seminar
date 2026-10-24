@@ -14,6 +14,7 @@ from agents import state_encoder
 from agents import agent
 import utils
 
+
 class Actor(nn.Module):
     def __init__(self, latent_size, action_size, min_action, max_action):
         super(Actor, self).__init__()
@@ -31,6 +32,7 @@ class Actor(nn.Module):
         x = self.min_action + (self.max_action - self.min_action) * F.sigmoid(self.l3(x))
         return x
 
+
 class Critic(nn.Module):
     def __init__(self, latent_size, action_size):
         super(Critic, self).__init__()
@@ -46,6 +48,7 @@ class Critic(nn.Module):
         x = self.l3(x)
         return x
 
+
 class TD3Agent(agent.Agent):
     def __init__(self, env, config):
         self.env = env
@@ -57,12 +60,21 @@ class TD3Agent(agent.Agent):
             self.device = torch.device("cpu")
 
         # Replay Buffer
-        self.replay_buffer = data.TensorDictReplayBuffer(storage=data.replay_buffers.LazyMemmapStorage(max_size=self.config.buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True), batch_size=self.config.batch_size)
+        self.replay_buffer = data.TensorDictReplayBuffer(
+            storage=data.replay_buffers.LazyMemmapStorage(
+                max_size=self.config.buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True
+            ),
+            batch_size=self.config.batch_size,
+        )
 
         # Networks
         self.state_encoder = state_encoder.StateEncoder().to(self.device)
-        self.p_actor = Actor(self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action).to(self.device)
-        self.p_target = Actor(self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action).to(self.device)
+        self.p_actor = Actor(
+            self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action
+        ).to(self.device)
+        self.p_target = Actor(
+            self.config.latent_size, self.config.action_size, self.config.min_action, self.config.max_action
+        ).to(self.device)
         self.q1_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q2_critic = Critic(self.config.latent_size, self.config.action_size).to(self.device)
         self.q1_target = Critic(self.config.latent_size, self.config.action_size).to(self.device)
@@ -97,18 +109,27 @@ class TD3Agent(agent.Agent):
             pt.data.add_((1.0 - self.config.tau) * pc.data)
 
     def update(self):
-        assert self.config.batch_size <= self.replay_buffer.write_count, "Replay buffer is not sufficiently filled for sampling!"
+        assert (
+            self.config.batch_size <= self.replay_buffer.write_count
+        ), "Replay buffer is not sufficiently filled for sampling!"
         for j in range(self.config.num_updates):
             transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
             with torch.no_grad():
                 next_latent = self.state_encoder(transitions["next_obs"])
                 next_samples = self.p_target(next_latent)
-                e = torch.clip(torch.randn_like(next_samples) * self.config.update_noise, -self.config.noise_clip, self.config.noise_clip)
+                e = torch.clip(
+                    torch.randn_like(next_samples) * self.config.update_noise,
+                    -self.config.noise_clip,
+                    self.config.noise_clip,
+                )
                 next_actions = torch.clip(next_samples + e, -self.config.max_action, self.config.max_action)
                 q1_t = self.q1_target(next_latent, next_actions)
                 q2_t = self.q2_target(next_latent, next_actions)
                 q_t = torch.min(q1_t, q2_t)
-                q_t = self.config.reward_scale * transitions["rewards"] + (1.0 - transitions["dones"]) * self.config.gamma * q_t
+                q_t = (
+                    self.config.reward_scale * transitions["rewards"]
+                    + (1.0 - transitions["dones"]) * self.config.gamma * q_t
+                )
 
             # encode observation
             self.state_encoder_optimizer.zero_grad()
@@ -121,11 +142,11 @@ class TD3Agent(agent.Agent):
             q2_c = self.q2_critic(latent, transitions["actions"])
             q1_loss = F.mse_loss(q1_c, q_t)
             q2_loss = F.mse_loss(q2_c, q_t)
-            #print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
-            #print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
+            # print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
+            # print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
             (q1_loss + q2_loss).backward(retain_graph=(j + 1) % self.config.update_interval == 0)
-            #nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
-            #nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
+            # nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
+            # nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
             self.q1_optimizer.step()
             self.q2_optimizer.step()
 
@@ -136,9 +157,9 @@ class TD3Agent(agent.Agent):
                 actions = self.p_actor(latent)
                 q_c = self.q1_critic(latent, actions)
                 p_loss = -q_c.mean()
-                #print(f"p_loss={p_loss.item()}")
+                # print(f"p_loss={p_loss.item()}")
                 p_loss.backward()
-                #nn.utils.clip_grad_norm_(self.p_actor.parameters(), 5.0)
+                # nn.utils.clip_grad_norm_(self.p_actor.parameters(), 5.0)
                 self.p_optimizer.step()
                 for p in self.q1_critic.parameters():
                     p.requires_grad_(True)
@@ -186,7 +207,7 @@ class TD3Agent(agent.Agent):
                 done = terminated or truncated
                 self.replay_buffer.add(self._to_tensordict(obs, action, reward, next_obs, terminated))
                 if done:
-                    obs, _  = self.env.reset()
+                    obs, _ = self.env.reset()
                 else:
                     obs = next_obs
         # train agent
@@ -242,6 +263,7 @@ class TD3Agent(agent.Agent):
         self.q1_optimizer.load_state_dict(checkpoint["q1_optimizer"])
         self.q2_optimizer.load_state_dict(checkpoint["q2_optimizer"])
 
+
 class TD3AgentConfig:
     device = "cuda"
     buffer_size = 1000
@@ -252,7 +274,7 @@ class TD3AgentConfig:
     noise_clip = 0.5
     replay_buffer_prefill_size = 256
     replay_buffer_dir = pathlib.Path("/DATA1/mlinke/modelling-seminar/td3_buffer")
-    latent_size = 768
+    latent_size = 1024
     action_size = 4
     min_action = 0.0
     max_action = 13.0
