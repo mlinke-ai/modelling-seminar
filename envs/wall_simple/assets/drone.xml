@@ -28,7 +28,7 @@
 		<light name="spotlight" mode="targetbodycom" target="x2" pos="0 -1 2"/>
 		<body name="x2" pos="0 0 0.15" euler="0 0 1">
 			<freejoint/>
-			<camera name="depth_cam" resolution="960 540" pos="-0.5 0 0" xyaxes="0 1 0 0 0 1" mode="fixed" output="rgb depth"/>
+			<camera name="depth_cam" resolution="480 360" fovy="60" pos="-0.5 0 0" xyaxes="0 1 0 0 0 1" mode="fixed" output="rgb depth"/>
 			<light name="cam_light" pos="-0.5 0 0" dir="-1 0 0" mode="fixed" cutoff="0.5"/>
 			<camera name="track" pos="0 0 2.5" xyaxes="-1 0 0 0 -1 0" mode="trackcom"/>
 			<site name="imu" pos="0 0 .02"/>
