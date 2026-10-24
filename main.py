@@ -2,18 +2,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import gymnasium
+import gymnasium.wrappers as wrappers
 
 import agents
 import envs
 
-EPISODES = 500
+EPISODES = 5
+
 
 def main():
     torch.autograd.set_detect_anomaly(True)
     #torch.cuda.memory._record_memory_history(max_entries=100000)
 
-    #env = gymnasium.make("Pendulum-v1")
-    env = envs.WallSimple()
+    # env = gymnasium.make("Pendulum-v1")
+    env = envs.WallSimple(render_mode="rgb_array")
+    env = wrappers.RecordVideo(env, video_folder="./recordings", episode_trigger=lambda t: (t + 1) % 100 == 0)
 
     sac_config = agents.SACAgentConfig()
     sac_agent = agents.SACAgent(env, sac_config)
@@ -27,6 +30,7 @@ def main():
         #torch.cuda.memory._dump_snapshot("profile.pkl")
         #torch.cuda.memory._record_memory_history(enabled=None)
 
+    """
     td3_config = agents.TD3AgentConfig()
     td3_agent = agents.TD3Agent(env, td3_config)
     try:
@@ -36,15 +40,16 @@ def main():
         print(e)
     finally:
         env.reset()
+    """
 
     fig, (rewards, steps) = plt.subplots(2, 1, sharex=True)
     rewards.plot(sac_history["rewards"], label="SAC")
-    rewards.plot(td3_history["rewards"], label="TD3")
+    #rewards.plot(td3_history["rewards"], label="TD3")
     rewards.set_xlabel("Episodes")
     rewards.set_ylabel("Reward")
     rewards.legend()
     steps.plot(sac_history["steps"], label="SAC")
-    steps.plot(td3_history["steps"], label="TD3")
+    #steps.plot(td3_history["steps"], label="TD3")
     steps.set_xlabel("Episodes")
     steps.set_ylabel("Steps")
     steps.legend()

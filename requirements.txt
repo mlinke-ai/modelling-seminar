@@ -2,6 +2,7 @@ gymnasium
 imageio
 matplotlib
 mujoco
+moviepy
 numpy
 tensordict
 torch
