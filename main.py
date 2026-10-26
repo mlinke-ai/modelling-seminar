@@ -7,7 +7,7 @@ import gymnasium.wrappers as wrappers
 import agents
 import envs
 
-EPISODES = 5
+EPISODES = 10000
 
 
 def main():
@@ -16,7 +16,7 @@ def main():
 
     # env = gymnasium.make("Pendulum-v1")
     env = envs.WallSimple(render_mode="rgb_array")
-    env = wrappers.RecordVideo(env, video_folder="./recordings", episode_trigger=lambda t: (t + 1) % 100 == 0)
+    #env = wrappers.RecordVideo(env, video_folder="./recordings", episode_trigger=lambda t: (t + 1) % 100 == 0)
 
     sac_config = agents.SACAgentConfig()
     sac_agent = agents.SACAgent(env, sac_config)
