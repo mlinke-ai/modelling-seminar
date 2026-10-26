@@ -333,7 +333,7 @@ class SACAgent(agent.Agent):
 
 class SACAgentConfig:
     device = "cuda"
-    buffer_size = 1000
+    buffer_size = 1000000
     batch_size = 16
     update_interval = 1
     num_updates = 1
