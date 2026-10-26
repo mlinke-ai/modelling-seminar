@@ -12,9 +12,16 @@ class StateEncoder(nn.Module):
         self.img_net.features.insert(0, nn.Conv2d(4, 96, kernel_size=7, stride=2))
         self.img_net.classifier = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.aux_net = nn.Sequential(nn.LayerNorm(), nn.Linear(19, 32), nn.SiLU(), nn.Linear(32, 16))
+        self.aux_net = nn.Sequential(
+            nn.LayerNorm(19),
+            nn.Linear(19, 64),
+            nn.SiLU(inplace=True),
+            nn.Linear(64, 64),
+            nn.SiLU(inplace=True),
+            nn.Linear(64, 64),
+        )
 
-        self.encoder = nn.Sequential(nn.Dropout(p=0.2, inplace=True), nn.Linear(1040, 512))
+        self.encoder = nn.Sequential(nn.Dropout(p=0.2, inplace=True), nn.Linear(1088, 512))
 
     def forward(self, obs):
         imgs = torch.tensor_split(obs["rgbd"], 2, dim=1)
