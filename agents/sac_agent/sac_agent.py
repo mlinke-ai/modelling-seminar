@@ -17,6 +17,7 @@ import math
 import datetime
 from agents import state_encoder
 from agents import agent
+import itertools
 
 
 class Actor(nn.Module):
@@ -96,22 +97,39 @@ class SACAgent(agent.Agent):
         )  # prefetch: int (prefetch N batches), transform: Callable (convert uint8[0; 255] images to float32[0.0; 1.0])
 
         # Networks
-        self.state_encoder = state_encoder.StateEncoder().to(self.device)
+        self.actor_encoder = state_encoder.StateEncoder().to(self.device)
+        self.critic_encoder = state_encoder.StateEncoder().to(self.device)
+        self.target_encoder = state_encoder.StateEncoder().to(self.device)
         self.actor = Actor(
-            self.config.latent_size, self.config.hidden_size, self.config.action_size, self.config.min_action, self.config.max_action
+            self.config.latent_size,
+            self.config.hidden_size,
+            self.config.action_size,
+            self.config.min_action,
+            self.config.max_action,
         ).to(self.device)
-        self.q1_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
-        self.q2_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
-        self.q1_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
-        self.q2_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
+        self.q1_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
+        self.q2_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
+        self.q1_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
+        self.q2_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
         self.q1_target.load_state_dict(self.q1_critic.state_dict())
         self.q2_target.load_state_dict(self.q2_critic.state_dict())
 
         # Optimizers
-        self.state_encoder_optimizer = optim.Adam(self.state_encoder.parameters(), lr=self.config.state_encoder_lr)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.config.actor_lr)
-        self.q1_optimizer = optim.Adam(self.q1_critic.parameters(), lr=self.config.critic_lr)
-        self.q2_optimizer = optim.Adam(self.q2_critic.parameters(), lr=self.config.critic_lr)
+        self.actor_optimizer = optim.Adam(
+            itertools.chain(self.actor_encoder.parameters(), self.actor.parameters()), lr=self.config.actor_lr
+        )
+        self.critic_optimizer = optim.Adam(
+            itertools.chain(self.critic_encoder.parameters(), self.q1_critic.parameters(), self.q2_critic.parameters()),
+            lr=self.config.critic_lr,
+        )
 
         # Entropy coefficient
         self.target_entropy = -torch.prod(torch.tensor(self.env.action_space.shape), dtype=torch.float32).item()
@@ -122,11 +140,14 @@ class SACAgent(agent.Agent):
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
-            latent = self.state_encoder(obs.unsqueeze(0).to(torch.float32))
+            latent = self.actor_encoder(obs.unsqueeze(0).to(torch.float32))
             action, _ = self.actor.sample(latent, probabilistic=probabilistic)
         return action.squeeze(0).numpy(force=True)
 
     def soft_update(self):
+        for pc, pt in zip(self.critic_encoder.parameters(), self.target_encoder.parameters()):
+            pt.data.mul_(self.config.tau)
+            pt.data.add_((1.0 - self.config.tau) * pc.data)
         for (
             pc,
             pt,
@@ -147,59 +168,57 @@ class SACAgent(agent.Agent):
         for _ in range(self.config.num_updates):
             transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
             with torch.no_grad():
-                next_latent = self.state_encoder(transitions["next_obs"])
-                next_actions, next_log_probs = self.actor.sample(next_latent)
-                q1_t = self.q1_target(next_latent, next_actions)
-                q2_t = self.q2_target(next_latent, next_actions)
+                next_actor_latent = self.actor_encoder(transitions["next_obs"])
+                next_critic_latent = self.target_encoder(transitions["next_obs"])
+                next_actions, next_log_probs = self.actor.sample(next_actor_latent)
+                q1_t = self.q1_target(next_critic_latent, next_actions)
+                q2_t = self.q2_target(next_critic_latent, next_actions)
                 q_t = torch.min(q1_t, q2_t) - self.alpha.exp() * next_log_probs
                 q_t = (
                     self.config.reward_scale * transitions["rewards"]
                     + (1.0 - transitions["dones"]) * self.config.gamma * q_t
                 )
 
-            # encode observation
-            self.state_encoder_optimizer.zero_grad()
-            latent = self.state_encoder(transitions["obs"])
-
             # update critics
-            self.q1_optimizer.zero_grad()
-            self.q2_optimizer.zero_grad()
-            q1_c = self.q1_critic(latent, transitions["actions"])
-            q2_c = self.q2_critic(latent, transitions["actions"])
+            self.critic_optimizer.zero_grad()
+            critic_latent = self.critic_encoder(transitions["obs"])
+            q1_c = self.q1_critic(critic_latent, transitions["actions"])
+            q2_c = self.q2_critic(critic_latent, transitions["actions"])
             q1_loss = F.mse_loss(q1_c, q_t)
             q2_loss = F.mse_loss(q2_c, q_t)
-            print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
-            print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
-            (q1_loss + q2_loss).backward(retain_graph=True)
+            #print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
+            #print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
+            (q1_loss + q2_loss).backward()
             # nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
-            # nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
-            self.q1_optimizer.step()
-            self.q2_optimizer.step()
+            self.critic_optimizer.step()
 
             # update actor
+            for p in self.critic_encoder.parameters():
+                p.requires_grad_(False)
             for p in self.q1_critic.parameters():
                 p.requires_grad_(False)
             for p in self.q2_critic.parameters():
                 p.requires_grad_(False)
             self.actor_optimizer.zero_grad()
-            new_actions, new_log_probs = self.actor.sample(latent)
-            new_q1_c = self.q1_critic(latent, new_actions)
-            new_q2_c = self.q2_critic(latent, new_actions)
+            actor_latent = self.actor_encoder(transitions["obs"])
+            critic_latent = self.critic_encoder(transitions["obs"])
+            new_actions, new_log_probs = self.actor.sample(actor_latent)
+            new_q1_c = self.q1_critic(critic_latent, new_actions)
+            new_q2_c = self.q2_critic(critic_latent, new_actions)
             new_q_c = torch.min(new_q1_c, new_q2_c)
             # actor_loss = (new_q_c - torch.unsqueeze(self.alpha.exp() * new_log_probs, -1)).mean()
             actor_loss = (self.alpha.exp().detach() * new_log_probs - new_q_c).mean()
-            print(f"new_log_probs=[{new_log_probs.min().item()}; {new_log_probs.max().item()}]")
-            print(f"actor_loss={actor_loss.item()}")
+            #print(f"new_log_probs=[{new_log_probs.min().item()}; {new_log_probs.max().item()}]")
+            #print(f"actor_loss={actor_loss.item()}")
             actor_loss.backward()
             # nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
             self.actor_optimizer.step()
+            for p in self.critic_encoder.parameters():
+                p.requires_grad_(True)
             for p in self.q1_critic.parameters():
                 p.requires_grad_(True)
             for p in self.q2_critic.parameters():
                 p.requires_grad_(True)
-
-            # update state encoder
-            self.state_encoder_optimizer.step()
 
             # update entropy
             self.alpha_optimizer.zero_grad()
