@@ -30,11 +30,11 @@ class Actor(nn.Module):
         self.max_action = max_action
 
     def forward(self, latent):
-        x = F.silu(self.l1(latent))
-        x = F.silu(self.l2(x))
-        x = F.silu(self.l3(x))
-        x = F.silu(self.l4(x))
-        x = F.sliu(self.l5(x))
+        x = F.silu(self.l1(latent), inplace=True)
+        x = F.silu(self.l2(x), inplace=True)
+        x = F.silu(self.l3(x), inplace=True)
+        x = F.silu(self.l4(x), inplace=True)
+        x = F.sliu(self.l5(x), inplace=True)
         return self.min_action + (self.max_action - self.min_action) * x
 
 
@@ -50,10 +50,10 @@ class Critic(nn.Module):
 
     def forward(self, latent, action):
         x = torch.cat((latent, action), dim=-1)
-        x = F.silu(self.l1(x))
-        x = F.silu(self.l2(x))
-        x = F.silu(self.l3(x))
-        x = F.silu(self.l4(x))
+        x = F.silu(self.l1(x), inplace=True)
+        x = F.silu(self.l2(x), inplace=True)
+        x = F.silu(self.l3(x), inplace=True)
+        x = F.silu(self.l4(x), inplace=True)
         x = self.l5(x)
         return x
 

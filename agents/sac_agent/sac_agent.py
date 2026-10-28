@@ -40,10 +40,10 @@ class Actor(nn.Module):
         ]
 
     def forward(self, latent):
-        x = F.silu(self.l1(latent))
-        x = F.silu(self.l2(x))
-        x = F.silu(self.l3(x))
-        x = F.silu(self.l4(x))
+        x = F.silu(self.l1(latent), inplace=True)
+        x = F.silu(self.l2(x), inplace=True)
+        x = F.silu(self.l3(x), inplace=True)
+        x = F.silu(self.l4(x), inplace=True)
         mu = self.mu(x)
         sd = torch.clamp(self.sd(x), min=-20.0, max=2.0).exp()
         return mu, sd
@@ -72,10 +72,10 @@ class Critic(nn.Module):
 
     def forward(self, latent, action):
         x = torch.cat((latent, action), dim=-1)
-        x = F.silu(self.l1(x))
-        x = F.silu(self.l2(x))
-        x = F.silu(self.l3(x))
-        x = F.silu(self.l4(x))
+        x = F.silu(self.l1(x), inplace=True)
+        x = F.silu(self.l2(x), inplace=True)
+        x = F.silu(self.l3(x), inplace=True)
+        x = F.silu(self.l4(x), inplace=True)
         x = self.l5(x)
         return x
 
