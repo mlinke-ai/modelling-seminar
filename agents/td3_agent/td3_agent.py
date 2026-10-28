@@ -1,19 +1,20 @@
+import datetime
+import itertools
+import pathlib
+
+import numpy as np
+import tensordict
 import torch
+import torch.distributions as dist
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as dist
 import torch.optim as optim
 import torchrl
-from torchrl import data
-import pathlib
-import tensordict
-import numpy as np
 import tqdm
-import datetime
-from agents import state_encoder
-from agents import agent
+from torchrl import data
+
 import utils
-import itertools
+from agents import agent, state_encoder
 
 
 class Actor(nn.Module):
@@ -88,15 +89,31 @@ class TD3Agent(agent.Agent):
         self.critic_encoder = state_encoder.StateEncoder().to(self.device)
         self.target_encoder = state_encoder.StateEncoder().to(self.device)
         self.p_actor = Actor(
-            self.config.latent_size, self.config.hidden_size, self.config.action_size, self.config.min_action, self.config.max_action
+            self.config.latent_size,
+            self.config.hidden_size,
+            self.config.action_size,
+            self.config.min_action,
+            self.config.max_action,
         ).to(self.device)
         self.p_target = Actor(
-            self.config.latent_size, self.config.hidden_size, self.config.action_size, self.config.min_action, self.config.max_action
+            self.config.latent_size,
+            self.config.hidden_size,
+            self.config.action_size,
+            self.config.min_action,
+            self.config.max_action,
         ).to(self.device)
-        self.q1_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
-        self.q2_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
-        self.q1_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
-        self.q2_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(self.device)
+        self.q1_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
+        self.q2_critic = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
+        self.q1_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
+        self.q2_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
+            self.device
+        )
         self.p_target_encoder.load_state_dict(self.p_actor_encoder.state_dict())
         self.target_encoder.load_state_dict(self.critic_encoder.state_dict())
         self.p_target.load_state_dict(self.p_actor.state_dict())
@@ -104,8 +121,13 @@ class TD3Agent(agent.Agent):
         self.q2_target.load_state_dict(self.q2_critic.state_dict())
 
         # Optimizers
-        self.actor_optimizer = optim.Adam(itertools.chain(self.p_actor_encoder.parameters(), self.p_actor.parameters()), lr=self.config.actor_lr)
-        self.critic_optimizer = optim.Adam(itertools.chain(self.critic_encoder.parameters(), self.q1_critic.parameters(), self.q2_critic.parameters()), lr=self.config.critic_lr)
+        self.actor_optimizer = optim.Adam(
+            itertools.chain(self.p_actor_encoder.parameters(), self.p_actor.parameters()), lr=self.config.actor_lr
+        )
+        self.critic_optimizer = optim.Adam(
+            itertools.chain(self.critic_encoder.parameters(), self.q1_critic.parameters(), self.q2_critic.parameters()),
+            lr=self.config.critic_lr,
+        )
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():

@@ -1,23 +1,24 @@
+import datetime
+import itertools
+import math
+import pathlib
+import typing
+
+import numpy as np
+import tensordict
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import torch.distributions as dist
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 import torch.nn.parameter as parameter
+import torch.optim as optim
 import torchrl
-from torchrl import data
-import pathlib
-import tensordict
-import numpy as np
-import utils
 import tqdm
-import typing
-import math
-import datetime
-from agents import state_encoder
-from agents import agent
-import itertools
+from torchrl import data
+
+import utils
+from agents import agent, state_encoder
 
 
 class Actor(nn.Module):
@@ -195,8 +196,8 @@ class SACAgent(agent.Agent):
             q2_c = self.q2_critic(critic_latent, transitions["actions"])
             q1_loss = F.mse_loss(q1_c, q_t)
             q2_loss = F.mse_loss(q2_c, q_t)
-            #print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
-            #print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
+            # print(f"q_t={q_t.max().item()}, q1_c={q1_c.max().item()}")
+            # print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
             (q1_loss + q2_loss).backward()
             # nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
             # nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
@@ -218,8 +219,8 @@ class SACAgent(agent.Agent):
             new_q_c = torch.min(new_q1_c, new_q2_c)
             # actor_loss = (new_q_c - torch.unsqueeze(self.alpha.exp() * new_log_probs, -1)).mean()
             actor_loss = (self.alpha.exp().detach() * new_log_probs - new_q_c).mean()
-            #print(f"new_log_probs=[{new_log_probs.min().item()}; {new_log_probs.max().item()}]")
-            #print(f"actor_loss={actor_loss.item()}")
+            # print(f"new_log_probs=[{new_log_probs.min().item()}; {new_log_probs.max().item()}]")
+            # print(f"actor_loss={actor_loss.item()}")
             actor_loss.backward()
             # nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0)
             self.actor_optimizer.step()
