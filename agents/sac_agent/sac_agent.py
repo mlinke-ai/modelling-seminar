@@ -127,6 +127,7 @@ class SACAgent(agent.Agent):
         self.q2_target = Critic(self.config.latent_size, self.config.hidden_size, self.config.action_size).to(
             self.device
         )
+        self.target_encoder.load_state_dict(self.critic_encoder.state_dict())
         self.q1_target.load_state_dict(self.q1_critic.state_dict())
         self.q2_target.load_state_dict(self.q2_critic.state_dict())
 
@@ -148,7 +149,7 @@ class SACAgent(agent.Agent):
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
-            latent = self.actor_encoder(obs.unsqueeze(0).to(torch.float32))
+            latent = self.actor_encoder(obs.unsqueeze(0).to(torch.float32) / 255.0)
             action, _ = self.actor.sample(latent, probabilistic=probabilistic)
         return action.squeeze(0).numpy(force=True)
 
@@ -198,6 +199,7 @@ class SACAgent(agent.Agent):
             #print(f"q1_loss={q1_loss.item()}, q2_loss={q2_loss.item()}")
             (q1_loss + q2_loss).backward()
             # nn.utils.clip_grad_norm_(self.q1_critic.parameters(), 5.0)
+            # nn.utils.clip_grad_norm_(self.q2_critic.parameters(), 5.0)
             self.critic_optimizer.step()
 
             # update actor
