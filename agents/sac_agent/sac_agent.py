@@ -26,6 +26,8 @@ class Actor(nn.Module):
 
         self.l1 = nn.Linear(latent_size, hidden_size)
         self.l2 = nn.Linear(hidden_size, hidden_size)
+        self.l3 = nn.Linear(hidden_size, hidden_size)
+        self.l4 = nn.Linear(hidden_size, hidden_size)
         self.mu = nn.Linear(hidden_size, action_size)
         self.sd = nn.Linear(hidden_size, action_size)
 
@@ -40,6 +42,8 @@ class Actor(nn.Module):
     def forward(self, latent):
         x = F.silu(self.l1(latent))
         x = F.silu(self.l2(x))
+        x = F.silu(self.l3(x))
+        x = F.silu(self.l4(x))
         mu = self.mu(x)
         sd = torch.clamp(self.sd(x), min=-20.0, max=2.0).exp()
         return mu, sd
@@ -62,13 +66,17 @@ class Critic(nn.Module):
 
         self.l1 = nn.Linear(latent_size + action_size, hidden_size)
         self.l2 = nn.Linear(hidden_size, hidden_size)
-        self.l3 = nn.Linear(hidden_size, 1)
+        self.l3 = nn.Linear(hidden_size, hidden_size)
+        self.l4 = nn.Linear(hidden_size, hidden_size)
+        self.l5 = nn.Linear(hidden_size, 1)
 
     def forward(self, latent, action):
         x = torch.cat((latent, action), dim=-1)
         x = F.silu(self.l1(x))
         x = F.silu(self.l2(x))
-        x = self.l3(x)
+        x = F.silu(self.l3(x))
+        x = F.silu(self.l4(x))
+        x = self.l5(x)
         return x
 
 
@@ -260,7 +268,7 @@ class SACAgent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, train_episodes, eval_episodes=10, eval_interval=10):
+    def train(self, train_episodes, eval_episodes=10, eval_interval=10, save_interval=10):
         # prefill replay buffer
         missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
         if missing > 0:
@@ -277,26 +285,36 @@ class SACAgent(agent.Agent):
         # train agent
         print("Start training")
         history = {
-            "rewards": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.float32),
-            "steps": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.uint32),
+            "train_rewards": np.zeros(train_episodes, dtype=np.float32),
+            "train_steps": np.zeros(train_episodes, dtype=np.uint32),
+            "eval_rewards": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.float32),
+            "eval_steps": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.uint32),
         }
         idx = 0
+        start_training = datetime.datetime.now()
         for train_episode in range(train_episodes):
             start_time = datetime.datetime.now()
             train_reward, train_steps, _ = self.step()
+            history["train_rewards"][train_episode] = train_reward.astype(np.float32)
+            history["train_steps"][train_episode] = train_steps
             if (train_episode + 1) % eval_interval == 0:
                 for eval_episode in range(eval_episodes):
                     eval_reward, eval_steps, _ = self.evaluate()
-                    history["rewards"][idx] = eval_reward.astype(np.float32)
-                    history["steps"][idx] = eval_steps
+                    history["eval_rewards"][idx] = eval_reward.astype(np.float32)
+                    history["eval_steps"][idx] = eval_steps
                     idx += 1
+            if (train_episode + 1) % save_interval == 0:
+                self.save()
             end_time = datetime.datetime.now()
             print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})")
         for eval_episode in range(eval_episodes):
             eval_reward, eval_steps, _ = self.evaluate()
-            history["rewards"][idx] = eval_reward.astype(np.float32)
-            history["steps"][idx] = eval_steps
+            history["eval_rewards"][idx] = eval_reward.astype(np.float32)
+            history["eval_steps"][idx] = eval_steps
             idx += 1
+        self.save()
+        end_training = datetime.datetime.now()
+        print(f"training and evaluating took {end_training - start_training}")
         return history
 
     def evaluate(self):
@@ -306,12 +324,13 @@ class SACAgent(agent.Agent):
         file = pathlib.Path(file if file is not None else self.config.save_file).resolve()
         checkpoint = dict(
             actor=self.actor.state_dict(),
+            actor_encoder=self.actor_encoder.state_dict(),
             q1_critic=self.q1_critic.state_dict(),
             q2_critic=self.q2_critic.state_dict(),
+            critic_encoder=self.critic_encoder.state_dict(),
             alpha=self.alpha,
             actor_optimizer=self.actor_optimizer.state_dict(),
-            q1_optimizer=self.q1_optimizer.state_dict(),
-            q2_optimizer=self.q2_optimizer.state_dict(),
+            critic_optimizer=self.critic_optimizer.state_dict(),
             alpha_optimizer=self.alpha_optimizer.state_dict(),
         )
         torch.save(checkpoint, file)
@@ -320,14 +339,15 @@ class SACAgent(agent.Agent):
         file = pathlib.Path(file if file is not None else self.config.save_file).resolve()
         checkpoint = torch.load(file)
         self.actor.load_state_dict(checkpoint["actor"])
+        self.actor_encoder.load_state_dict(checkpoint["actor_encoder"])
         self.q1_critic.load_state_dict(checkpoint["q1_critic"])
         self.q1_target.load_state_dict(checkpoint["q1_critic"])
         self.q2_critic.load_state_dict(checkpoint["q2_critic"])
         self.q2_target.load_state_dict(checkpoint["q2_critic"])
+        self.critic_encoder.load_state_dict(checkpoint["critic_encoder"])
         self.alpha = checkpoint["alpha"]
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
-        self.q1_optimizer.load_state_dict(checkpoint["q1_optimizer"])
-        self.q2_optimizer.load_state_dict(checkpoint["q2_optimizer"])
+        self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
         self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer"])
 
 
