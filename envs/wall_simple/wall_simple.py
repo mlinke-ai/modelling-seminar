@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 from gymnasium import utils as gym_utils
 from gymnasium.envs import mujoco as gym_mujoco
@@ -184,8 +185,8 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
     def _get_rgbd_img(self):
         rgb_img, dep_img = self.mj_renderer.render(render_mode="rgbd_tuple")
         rgb_img = np.moveaxis(rgb_img, -1, 0)
-        dep_img = np.expand_dims(np.clip(dep_img, 0.0, 255.0), 0)
-        return np.concat((rgb_img, dep_img), axis=0).astype(np.uint8)
+        dep_img = np.expand_dims(dep_img, 0)
+        return (rgb_img, dep_img)
 
     def _get_obs(self):
         ang_pos = self.data.sensor("ang_pos").data.copy()  # framequat
@@ -196,9 +197,9 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         wpt_dir = self._wpt_position - lin_pos
         wpt_dis = np.linalg.norm(wpt_dir, ord=2)
         wpt_dir /= wpt_dis
-        aux_dat = np.concat((ang_pos, ang_vel, lin_pos, lin_vel, lin_acc, wpt_dir), axis=0).astype(np.float32)
-        rgbd = np.concat((self._image_before, self._image_after), axis=0)
-        return tensordict.TensorDict(dict(rgbd=rgbd, aux_dat=aux_dat))
+        aux_dat = np.concat((ang_pos, ang_vel, lin_vel, lin_acc, wpt_dir), axis=0).astype(np.float32)
+        img_dat = dict(rgb=np.concat((self._image_before[0], self._image_after[0]), axis=0), dep=np.concat((self._image_before[1], self._image_after[1]), axis=0))
+        return tensordict.TensorDict(dict(img_dat=img_dat, aux_dat=aux_dat))
 
     def _get_reward(self, action: np.array, wpt_dist: float, terminated: bool, truncated: bool):
         reward = 0.0
@@ -212,7 +213,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
     def step(self, action: np.array):
         position_before = self.data.body(self._drone_body).xpos[:3].copy()
-        self._image_before = self._image_after.copy()
+        self._image_before = copy.deepcopy(self._image_after)
         self.do_simulation(action, self.frame_skip)
         position_after = self.data.body(self._drone_body).xpos[:3].copy()
         self._image_after = self._get_rgbd_img()
@@ -260,7 +261,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self.set_state(qpos, qvel)
 
         self._image_before = self._get_rgbd_img()
-        self._image_after = self._image_before.copy()
+        self._image_after = copy.deepcopy(self._image_before)
         obs = self._get_obs()
 
         return obs
