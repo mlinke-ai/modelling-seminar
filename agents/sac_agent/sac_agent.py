@@ -93,8 +93,8 @@ class SACAgent(agent.Agent):
 
         # Replay Buffer
         def _sample_transform(sample):
-            sample["obs", "rgbd"] = sample["obs", "rgbd"].to(torch.float32) / 255.0
-            sample["next_obs", "rgbd"] = sample["next_obs", "rgbd"].to(torch.float32) / 255.0
+            sample["obs", "img_dat", "rgb"] = sample["obs", "img_dat", "rgb"].to(torch.float32) / 255.0
+            sample["next_obs", "img_dat", "rgb"] = sample["next_obs", "img_dat", "rgb"].to(torch.float32) / 255.0
             return sample
 
         self.replay_buffer = data.TensorDictReplayBuffer(
@@ -150,7 +150,8 @@ class SACAgent(agent.Agent):
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
-            latent = self.actor_encoder(obs.unsqueeze(0).to(torch.float32) / 255.0)
+            obs["img_dat", "rgb"] = obs["img_dat", "rgb"].to(torch.float32) / 255.0
+            latent = self.actor_encoder(obs.unsqueeze(0))
             action, _ = self.actor.sample(latent, probabilistic=probabilistic)
         return action.squeeze(0).numpy(force=True)
 
@@ -329,8 +330,11 @@ class SACAgent(agent.Agent):
             actor=self.actor.state_dict(),
             actor_encoder=self.actor_encoder.state_dict(),
             q1_critic=self.q1_critic.state_dict(),
+            q1_target=self.q1_target.state_dict(),
             q2_critic=self.q2_critic.state_dict(),
+            q2_target=self.q2_target.state_dict(),
             critic_encoder=self.critic_encoder.state_dict(),
+            target_encoder=self.target_encoder.state_dict(),
             alpha=self.alpha,
             actor_optimizer=self.actor_optimizer.state_dict(),
             critic_optimizer=self.critic_optimizer.state_dict(),
@@ -344,20 +348,25 @@ class SACAgent(agent.Agent):
         self.actor.load_state_dict(checkpoint["actor"])
         self.actor_encoder.load_state_dict(checkpoint["actor_encoder"])
         self.q1_critic.load_state_dict(checkpoint["q1_critic"])
-        self.q1_target.load_state_dict(checkpoint["q1_critic"])
+        self.q1_target.load_state_dict(checkpoint["q1_target"])
         self.q2_critic.load_state_dict(checkpoint["q2_critic"])
-        self.q2_target.load_state_dict(checkpoint["q2_critic"])
+        self.q2_target.load_state_dict(checkpoint["q2_target"])
         self.critic_encoder.load_state_dict(checkpoint["critic_encoder"])
+        self.target_encoder.load_state_dict(checkpoint["target_encoder"])
         self.alpha = checkpoint["alpha"]
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
         self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer"])
 
+    @staticmethod
+    def get_default_config():
+        return SACAgentConfig()
+
 
 class SACAgentConfig:
     device = "cuda"
     buffer_size = 1000000
-    batch_size = 16
+    batch_size = 32
     update_interval = 1
     num_updates = 1
     replay_buffer_prefill_size = 256
