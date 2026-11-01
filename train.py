@@ -25,7 +25,7 @@ def main():
     # torch.cuda.memory._record_memory_history(max_entries=100000)
 
     # env = gymnasium.make("Pendulum-v1")
-    env = envs.WallSimple(render_mode="rgb_array")
+    env = envs.WallSimple(render_mode="rgb_array", randomize_wall_pos=True)
     if args.record > 0:
         env = wrappers.RecordVideo(env, video_folder="./recordings", episode_trigger=lambda t: (t + 1) % args.record == 0)
 

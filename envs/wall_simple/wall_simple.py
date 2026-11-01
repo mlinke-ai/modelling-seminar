@@ -35,11 +35,14 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         waypoint_body: int | str = "wp",
         terminate_when_unhealthy: bool = True,
         healthy_x_range: tuple[float, float] = (-0.5, 8.5),
-        healthy_y_range: tuple[float, float] = (-1.5, 1.5),
+        healthy_y_range: tuple[float, float] = (-2.5, 2.5),
         healthy_z_range: tuple[float, float] = (0.1, 5.0),
         healthy_cosz_range: tuple[float, float] = (0.7, 1.0),
         min_wpt_distance: float = 0.1,
         reset_noise_scale: float = 0.1,
+        randomize_wall_pos: bool = False,
+        min_wall_pos: tuple[float, float, float] = (4.0, -1.0, 1.5),
+        max_wall_pos: tuple[float, float, float] = (4.0, 1.0, 3.5),
         **kwargs
     ):
         parent_dir = pathlib.Path(__file__).parent
@@ -69,6 +72,9 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             healthy_cosz_range,
             min_wpt_distance,
             reset_noise_scale,
+            randomize_wall_pos,
+            min_wall_pos,
+            max_wall_pos,
             **kwargs
         )
 
@@ -99,6 +105,9 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._total_action_cost = 0.0
 
         self._reset_noise_scale = reset_noise_scale
+        self._randomize_wall_pos = randomize_wall_pos
+        self._min_wall_pos = min_wall_pos
+        self._max_wall_pos = max_wall_pos
 
         gym_mujoco.MujocoEnv.__init__(
             self,
@@ -259,6 +268,12 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         qpos = self.init_qpos + self.np_random.uniform(low=noise_low, high=noise_high, size=self.model.nq)
         qvel = self.init_qvel + self._reset_noise_scale * self.np_random.standard_normal(self.model.nv)
         self.set_state(qpos, qvel)
+        
+        if self._randomize_wall_pos:
+            rand_pos = self.np_random.uniform(low=self._min_wall_pos, high=self._max_wall_pos, size=3)
+            geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "wall")
+            self.model.geom_pos[geom_id] = rand_pos.copy()
+            mujoco.mj_forward(self.model, self.data)
 
         self._image_before = self._get_rgbd_img()
         self._image_after = copy.deepcopy(self._image_before)
