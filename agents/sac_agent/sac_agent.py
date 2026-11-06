@@ -1,3 +1,4 @@
+import csv
 import datetime
 import itertools
 import math
@@ -99,11 +100,12 @@ class SACAgent(agent.Agent):
 
         self.replay_buffer = data.TensorDictReplayBuffer(
             storage=data.replay_buffers.LazyMemmapStorage(
-                max_size=self.config.buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True
+                max_size=self.config.replay_buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True
             ),
             batch_size=self.config.batch_size,
             transform=_sample_transform,
-        )  # prefetch: int (prefetch N batches), transform: Callable (convert uint8[0; 255] images to float32[0.0; 1.0])
+            prefetch=self.config.replay_buffer_prefetch,
+        )
 
         # Networks
         self.actor_encoder = state_encoder.StateEncoder().to(self.device)
@@ -272,7 +274,7 @@ class SACAgent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, train_episodes, eval_episodes=10, eval_interval=10, save_interval=10):
+    def train(self, train_episodes, eval_episodes=10, eval_interval=10, save_interval=10, metrics=None):
         # prefill replay buffer
         missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
         if missing > 0:
@@ -288,38 +290,44 @@ class SACAgent(agent.Agent):
                     obs = next_obs
         # train agent
         print("Start training")
-        history = {
-            "train_rewards": np.zeros(train_episodes, dtype=np.float32),
-            "train_steps": np.zeros(train_episodes, dtype=np.uint32),
-            "eval_rewards": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.float32),
-            "eval_steps": np.zeros(eval_episodes * (train_episodes // eval_interval + 1), dtype=np.uint32),
-        }
+        if metrics is not None:
+            train_file = (metrics.parent / (metrics.stem + "_train.csv")).open(mode="a", newline="")
+            train_writer = csv.writer(train_file, delimiter=";")
+            train_writer.writerow(["episode", "reward", "steps"])
+            eval_file = (metrics.parent / (metrics.stem + "_eval.csv")).open(mode="a", newline="")
+            eval_writer = csv.writer(eval_file, delimiter=";")
+            eval_writer.writerow(["episode", "reward", "steps"])
         idx = 0
         start_training = datetime.datetime.now()
         for train_episode in range(train_episodes):
             start_time = datetime.datetime.now()
             train_reward, train_steps, _ = self.step()
-            history["train_rewards"][train_episode] = train_reward.astype(np.float32)
-            history["train_steps"][train_episode] = train_steps
+            if metrics is not None:
+                train_writer.writerow([train_episode, train_reward, train_steps])
+                train_file.flush()
             if (train_episode + 1) % eval_interval == 0:
                 for eval_episode in range(eval_episodes):
                     eval_reward, eval_steps, _ = self.evaluate()
-                    history["eval_rewards"][idx] = eval_reward.astype(np.float32)
-                    history["eval_steps"][idx] = eval_steps
+                    if metrics is not None:
+                        eval_writer.writerow([idx, eval_reward, eval_steps])
+                        eval_file.flush()
                     idx += 1
             if (train_episode + 1) % save_interval == 0:
                 self.save()
             end_time = datetime.datetime.now()
-            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})")
+            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})", flush=True)
         for eval_episode in range(eval_episodes):
             eval_reward, eval_steps, _ = self.evaluate()
-            history["eval_rewards"][idx] = eval_reward.astype(np.float32)
-            history["eval_steps"][idx] = eval_steps
+            if metrics is not None:
+                eval_writer.writerow([idx, eval_reward, eval_steps])
+                eval_file.flush()
             idx += 1
         self.save()
+        if metrics is not None:
+            train_file.close()
+            eval_file.close()
         end_training = datetime.datetime.now()
         print(f"training and evaluating took {end_training - start_training}")
-        return history
 
     def evaluate(self):
         return self.step(evaluate=True)
@@ -365,12 +373,13 @@ class SACAgent(agent.Agent):
 
 class SACAgentConfig:
     device = "cuda"
-    buffer_size = 1000000
     batch_size = 32
     update_interval = 1
     num_updates = 1
+    replay_buffer_size = 1000000
     replay_buffer_prefill_size = 256
     replay_buffer_dir = pathlib.Path("/DATA01/mlinke/modelling-seminar/sac_buffer")
+    replay_buffer_prefetch = 16
     latent_size = 512
     hidden_size = 2560
     action_size = 4
