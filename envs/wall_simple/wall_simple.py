@@ -206,17 +206,27 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         wpt_dir = self._wpt_position - lin_pos
         wpt_dis = np.linalg.norm(wpt_dir, ord=2)
         wpt_dir /= wpt_dis
-        aux_dat = np.concat((ang_pos, ang_vel, lin_vel, lin_acc, wpt_dir), axis=0).astype(np.float32)
+        geo_fence = np.array([self._healthy_x_range, self._healthy_y_range, self._healthy_z_range], dtype=np.float32)
+        geo_fence_dist = np.abs(geo_fence - lin_pos.reshape(-1, 1))
+        aux_dat = np.concat((ang_pos, ang_vel, lin_vel, lin_acc, wpt_dir, geo_fence_dist.flatten()), axis=0).astype(np.float32)
         img_dat = dict(rgb=np.concat((self._image_before[0], self._image_after[0]), axis=0), dep=np.concat((self._image_before[1], self._image_after[1]), axis=0))
         return tensordict.TensorDict(dict(img_dat=img_dat, aux_dat=aux_dat))
 
-    def _get_reward(self, action: np.array, wpt_dist: float, terminated: bool, truncated: bool):
-        reward = 0.0
+    def _get_reward(self, action: np.array, wpt_conv: float, wpt_view: float, terminated: bool, truncated: bool):
+        # reward = 0.0
+        if truncated:
+            reward = 100.0
+        elif terminated:
+            reward = -100.0
+        else:
+            reward = wpt_conv + wpt_view
+        """
         reward += self._wpt_dist_cost_scale * (1.0 / wpt_dist)
         if truncated:
             reward -= self._action_cost_scale * self._total_action_cost
         else:
             reward -= self._unhealthy_cost if terminated else 0.0
+        """
         reward_info = dict()
         return reward, reward_info
 
@@ -227,7 +237,9 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         position_after = self.data.body(self._drone_body).xpos[:3].copy()
         self._image_after = self._get_rgbd_img()
 
-        velocity = np.linalg.norm(position_after - position_before, ord=2) / self.dt
+        translation = position_after - position_before
+        velocity = np.linalg.norm(translation, ord=2) / self.dt
+        view_dir = self.data.sensor("view_dir").data.copy()
         self._total_action_cost += np.linalg.norm(action, ord=2)
 
         obs = self._get_obs()
@@ -235,7 +247,11 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         terminated = False
         truncated = False
 
-        wpt_dist = np.linalg.norm(self._wpt_position - position_after, ord=2)
+        wpt_dir_before = self._wpt_position - position_before
+        wpt_dir_after = self._wpt_position - position_after
+        wpt_conv = np.dot(translation, wpt_dir_before) / (np.linalg.norm(translation) * np.linalg.norm(wpt_dir_before))
+        wpt_view = np.dot(view_dir, wpt_dir_before) / (np.linalg.norm(view_dir) * np.linalg.norm(wpt_dir_before))
+        wpt_dist = np.linalg.norm(wpt_dir_after, ord=2)
 
         if wpt_dist < self._min_wpt_distance:
             try:
@@ -245,7 +261,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
         is_healthy, health_info = self.is_healthy
         terminated = (not is_healthy) and self._terminate_when_unhealthy
-        reward, reward_info = self._get_reward(action, wpt_dist, terminated, truncated)
+        reward, reward_info = self._get_reward(action, wpt_conv, wpt_view, terminated, truncated)
 
         info = {
             "position_before": position_before,
