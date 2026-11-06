@@ -34,17 +34,11 @@ def main():
     if args.weights.exists():
         agent.load(args.weights)
     try:
-        history = agent.train(train_episodes=args.episodes)
+        agent.train(train_episodes=args.episodes, metrics=args.metrics)
     except torch.OutOfMemoryError as e:
         print(e)
     else:
         agent.save(args.weights)
-        if args.metrics is not None:
-            if args.metrics.exists():
-                metrics = np.load(args.metrics)
-                for k, v in history.items():
-                    history[k] = np.concat((metrics[k], v))
-            np.savez(args.metrics, **history)
     finally:
         env.close()
         # torch.cuda.memory._dump_snapshot("profile.pkl")
