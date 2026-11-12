@@ -57,13 +57,12 @@
 	</actuator>
 
 	<sensor>
-		<framequat name="ang_pos" objtype="site" objname="imu"/>
 		<gyro name="ang_vel" site="imu"/>
 		<framepos name="lin_pos" objtype="site" objname="imu"/>
 		<velocimeter name="lin_vel" site="imu"/>
 		<accelerometer name="lin_acc" site="imu"/>
 		<framexaxis name="view_dir" objtype="site" objname="imu"/>
-		<framezaxis name="tilting" objtype="site" objname="imu"/>
+		<framezaxis name="up_dir" objtype="site" objname="imu"/>
 	</sensor>
 
 	<!--
