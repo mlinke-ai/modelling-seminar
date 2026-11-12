@@ -100,7 +100,7 @@ class SACAgent(agent.Agent):
 
         self.replay_buffer = data.TensorDictReplayBuffer(
             storage=data.replay_buffers.LazyMemmapStorage(
-                max_size=self.config.replay_buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True
+                max_size=self.config.replay_buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True, existsok=True
             ),
             batch_size=self.config.batch_size,
             transform=_sample_transform,
@@ -301,7 +301,7 @@ class SACAgent(agent.Agent):
         start_training = datetime.datetime.now()
         for train_episode in range(train_episodes):
             start_time = datetime.datetime.now()
-            train_reward, train_steps, _ = self.step()
+            train_reward, train_steps, info = self.step()
             if metrics is not None:
                 train_writer.writerow([train_episode, train_reward, train_steps])
                 train_file.flush()
@@ -315,7 +315,7 @@ class SACAgent(agent.Agent):
             if (train_episode + 1) % save_interval == 0:
                 self.save()
             end_time = datetime.datetime.now()
-            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})", flush=True)
+            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})\n{info}", flush=True)
         for eval_episode in range(eval_episodes):
             eval_reward, eval_steps, _ = self.evaluate()
             if metrics is not None:
