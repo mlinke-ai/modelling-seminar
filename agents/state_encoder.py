@@ -18,7 +18,7 @@ class StateEncoder(nn.Module):
         self.dep_net.classifier = nn.AdaptiveAvgPool2d((1, 1))
 
         self.aux_net = nn.Sequential(
-            nn.Linear(22, 64),
+            nn.Linear(21, 64),
             nn.SiLU(inplace=True),
             nn.Linear(64, 64),
             nn.SiLU(inplace=True),
