@@ -1,6 +1,9 @@
+import csv
 import datetime
 import itertools
+import math
 import pathlib
+import typing
 
 import numpy as np
 import tensordict
@@ -27,15 +30,21 @@ class Actor(nn.Module):
         self.l4 = nn.Linear(hidden_size, hidden_size)
         self.l5 = nn.Linear(hidden_size, action_size)
 
+        self.n1 = nn.BatchNorm1d(hidden_size)
+        self.n2 = nn.BatchNorm1d(hidden_size)
+        self.n3 = nn.BatchNorm1d(hidden_size)
+        self.n4 = nn.BatchNorm1d(hidden_size)
+        self.n5 = nn.BatchNorm1d(action_size)
+
         self.min_action = min_action
         self.max_action = max_action
 
     def forward(self, latent):
-        x = F.silu(self.l1(latent), inplace=True)
-        x = F.silu(self.l2(x), inplace=True)
-        x = F.silu(self.l3(x), inplace=True)
-        x = F.silu(self.l4(x), inplace=True)
-        x = F.sliu(self.l5(x), inplace=True)
+        x = F.silu(self.n1(self.l1(latent)))
+        x = F.silu(self.n2(self.l2(x)))
+        x = F.silu(self.n3(self.l3(x)))
+        x = F.silu(self.n4(self.l4(x)))
+        x = F.sigmoid(self.n5(self.l5(x)))
         return self.min_action + (self.max_action - self.min_action) * x
 
 
@@ -71,16 +80,17 @@ class TD3Agent(agent.Agent):
 
         # Replay Buffer
         def _sample_transform(sample):
-            sample["obs", "rgbd"] = sample["obs", "rgbd"].to(torch.float32) / 255.0
-            sample["next_obs", "rgbd"] = sample["next_obs", "rgbd"].to(torch.float32) / 255.0
+            sample["obs", "img_dat", "rgb"] = sample["obs", "img_dat", "rgb"].to(torch.float32) / 255.0
+            sample["next_obs", "img_dat", "rgb"] = sample["next_obs", "img_dat", "rgb"].to(torch.float32) / 255.0
             return sample
 
         self.replay_buffer = data.TensorDictReplayBuffer(
             storage=data.replay_buffers.LazyMemmapStorage(
-                max_size=self.config.buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True
+                max_size=self.config.replay_buffer_size, scratch_dir=self.config.replay_buffer_dir, auto_cleanup=True, existsok=True
             ),
             batch_size=self.config.batch_size,
             transform=_sample_transform,
+            prefetch=self.config.replay_buffer_prefetch,
         )
 
         # Networks
@@ -130,11 +140,14 @@ class TD3Agent(agent.Agent):
         )
 
     def select_action(self, obs, probabilistic=False):
+        self.p_actor_encoder.eval()
+        self.p_actor.eval()
         with torch.no_grad():
-            latent = self.actor_encoder(obs.unsqueeze(0).to(torch.float32) / 255.0)
+            obs["img_dat", "rgb"] = obs["img_dat", "rgb"].to(torch.float32) / 255.0
+            latent = self.p_actor_encoder(obs.unsqueeze(0))
             action = self.p_actor(latent)
             e = torch.randn_like(action) if probabilistic else 0.0
-            action = torch.clip(action + e, -self.config.max_action, self.config.max_action)
+            action = torch.clip(action + e, self.config.min_action, self.config.max_action)
         return action.squeeze(0).numpy(force=True)
 
     def soft_update(self):
@@ -158,6 +171,8 @@ class TD3Agent(agent.Agent):
         assert (
             self.config.batch_size <= self.replay_buffer.write_count
         ), "Replay buffer is not sufficiently filled for sampling!"
+        self.p_actor_encoder.train()
+        self.p_actor.train()
         for j in range(self.config.num_updates):
             transitions = self.replay_buffer.sample(self.config.batch_size).to(self.device)
             with torch.no_grad():
@@ -169,7 +184,7 @@ class TD3Agent(agent.Agent):
                     -self.config.noise_clip,
                     self.config.noise_clip,
                 )
-                next_actions = torch.clip(next_samples + e, -self.config.max_action, self.config.max_action)
+                next_actions = torch.clip(next_samples + e, self.config.min_action, self.config.max_action)
                 q1_t = self.q1_target(next_critic_latent, next_actions)
                 q2_t = self.q2_target(next_critic_latent, next_actions)
                 q_t = torch.min(q1_t, q2_t)
@@ -242,7 +257,7 @@ class TD3Agent(agent.Agent):
         }
         return tensordict.TensorDict(d)
 
-    def train(self, train_episodes, eval_episodes=10, eval_interval=10, save_interval=10):
+    def train(self, train_episodes, eval_episodes=10, eval_interval=10, save_interval=10, metrics=None):
         # prefill replay buffer
         missing = max(self.config.batch_size, self.config.replay_buffer_prefill_size) - len(self.replay_buffer)
         if missing > 0:
@@ -258,38 +273,41 @@ class TD3Agent(agent.Agent):
                     obs = next_obs
         # train agent
         print("Start training")
-        history = {
-            "train_rewards": np.zeros(train_episodes, dtype=np.float32),
-            "train_steps": np.zeros(train_episodes, dtype=np.uint32),
-            "eval_rewards": np.zeros(eval_episodes * (train_episodes // eval_episodes + 1), dtype=np.float32),
-            "eval_steps": np.zeros(eval_episodes * (train_episodes // eval_episodes + 1), dtype=np.uint32),
-        }
+        if metrics is not None:
+            train_file = (metrics.parent / (metrics.stem + "_train.csv")).open(mode="a", newline="")
+            train_writer = csv.writer(train_file, delimiter=";")
+            train_writer.writerow(["episode", "reward", "steps"])
+            eval_file = (metrics.parent / (metrics.stem + "_eval.csv")).open(mode="a", newline="")
+            eval_writer = csv.writer(eval_file, delimiter=";")
+            eval_writer.writerow(["episode", "reward", "steps"])
         idx = 0
         start_training = datetime.datetime.now()
         for train_episode in range(train_episodes):
             start_time = datetime.datetime.now()
-            train_reward, train_steps, _ = self.step()
-            history["train_rewards"][train_episode] = train_reward.astype(np.float32)
-            history["train_steps"][train_episode] = train_steps
+            train_reward, train_steps, info = self.step()
+            if metrics is not None:
+                train_writer.writerow([train_episode, train_reward, train_steps])
+                train_file.flush()
             if (train_episode + 1) % eval_interval == 0:
                 for eval_episode in range(eval_episodes):
                     eval_reward, eval_steps, _ = self.evaluate()
-                    history["eval_rewards"][idx] = eval_reward.astype(np.float32)
-                    history["eval_steps"][idx] = eval_steps
+                    if metrics is not None:
+                        eval_writer.writerow([idx, eval_reward, eval_steps])
+                        eval_file.flush()
                     idx += 1
             if (train_episode + 1) % save_interval == 0:
                 self.save()
             end_time = datetime.datetime.now()
-            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})")
+            print(f"{train_episode}: {train_steps=} {train_reward=} (elapsed time: {end_time - start_time})\n{info}", flush=True)
         for eval_episode in range(eval_episodes):
             eval_reward, eval_steps, _ = self.evaluate()
-            history["eval_rewards"][idx] = eval_reward.astype(np.float32)
-            history["eval_steps"][idx] = eval_steps
+            if metrics is not None:
+                eval_writer.writerow([idx, eval_reward, eval_steps])
+                eval_file.flush()
             idx += 1
         self.save()
         end_training = datetime.datetime.now()
         print(f"training and evaluating took {end_training - start_training}")
-        return history
 
     def evaluate(self):
         return self.step(evaluate=True)
@@ -323,17 +341,22 @@ class TD3Agent(agent.Agent):
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
 
+    @staticmethod
+    def get_default_config():
+        return TD3AgentConfig()
+
 
 class TD3AgentConfig:
     device = "cuda"
-    buffer_size = 1000000
-    batch_size = 16
+    batch_size = 32
     num_updates = 2
     update_interval = 2
     update_noise = 0.1
     noise_clip = 0.5
+    replay_buffer_size = 1000000
     replay_buffer_prefill_size = 256
-    replay_buffer_dir = pathlib.Path("/DATA1/mlinke/modelling-seminar/td3_buffer")
+    replay_buffer_dir = pathlib.Path("/DATA01/mlinke/modelling-seminar/td3_buffer")
+    replay_buffer_prefetch = 16
     latent_size = 512
     hidden_size = 2560
     action_size = 4
