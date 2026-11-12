@@ -37,12 +37,13 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         healthy_x_range: tuple[float, float] = (-0.5, 8.5),
         healthy_y_range: tuple[float, float] = (-2.5, 2.5),
         healthy_z_range: tuple[float, float] = (0.1, 5.0),
-        healthy_cosz_range: tuple[float, float] = (0.7, 1.0),
+        healthy_cosz: float = 0.7,
         min_wpt_distance: float = 0.1,
         reset_noise_scale: float = 0.1,
         randomize_wall_pos: bool = False,
         min_wall_pos: tuple[float, float, float] = (4.0, -1.0, 1.5),
         max_wall_pos: tuple[float, float, float] = (4.0, 1.0, 3.5),
+        max_steps: int = 150,
         **kwargs
     ):
         parent_dir = pathlib.Path(__file__).parent
@@ -69,12 +70,13 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             healthy_x_range,
             healthy_y_range,
             healthy_z_range,
-            healthy_cosz_range,
+            healthy_cosz,
             min_wpt_distance,
             reset_noise_scale,
             randomize_wall_pos,
             min_wall_pos,
             max_wall_pos,
+            max_steps,
             **kwargs
         )
 
@@ -89,7 +91,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._healthy_x_range = healthy_x_range
         self._healthy_y_range = healthy_y_range
         self._healthy_z_range = healthy_z_range
-        self._healthy_cosz_range = healthy_cosz_range
+        self._healthy_cosz = healthy_cosz
 
         self._drone_body = drone_body
         self._waypoint_body = waypoint_body
@@ -108,6 +110,8 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._randomize_wall_pos = randomize_wall_pos
         self._min_wall_pos = min_wall_pos
         self._max_wall_pos = max_wall_pos
+        self._max_steps = max_steps
+        self._step_counter = 0
 
         gym_mujoco.MujocoEnv.__init__(
             self,
@@ -159,18 +163,24 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
     @property
     def is_cosz_healthy(self):
-        cosz_min, cosz_max = self._healthy_cosz_range
-        tilting = self.data.sensor("tilting").data[2]
-        return cosz_min <= tilting <= cosz_max
+        cosz_min = self._healthy_cosz
+        tilting = self.data.sensor("up_dir").data[2]
+        return cosz_min <= tilting
 
     @property
     def is_uncollided(self):
         is_uncollided = self.data.contact.geom.size == 0
         if not is_uncollided:
-            collition_info = {"geom1": self.data.contact.geom1.copy(), "geom2": self.data.contact.geom2.copy()}
+            geom1 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, self.data.contact.geom1.copy()[0])
+            geom2 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, self.data.contact.geom2.copy()[0])
+            collition_info = {"geom1": geom1, "geom2": geom2}
         else:
             collition_info = {"geom1": None, "geom2": None}
         return is_uncollided, collition_info
+
+    @property
+    def is_t_healthy(self):
+        return self._step_counter < self._max_steps
 
     @property
     def is_healthy(self):
@@ -181,12 +191,14 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         is_healthy &= self.is_y_healthy
         is_healthy &= self.is_z_healthy
         is_healthy &= self.is_cosz_healthy
+        is_healthy &= self.is_t_healthy
         health_info = {
             "is_uncollided": is_uncollided,
             "is_x_healthy": self.is_x_healthy,
             "is_y_healthy": self.is_y_healthy,
             "is_z_healthy": self.is_z_healthy,
             "is_cosz_healthy": self.is_cosz_healthy,
+            "is_t_healthy": self.is_t_healthy,
             **collition_info,
         }
         return is_healthy, health_info
@@ -198,35 +210,27 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         return (rgb_img, dep_img)
 
     def _get_obs(self):
-        ang_pos = self.data.sensor("ang_pos").data.copy()  # framequat
         ang_vel = self.data.sensor("ang_vel").data.copy()  # gyro
         lin_pos = self.data.sensor("lin_pos").data.copy()  # framepos
         lin_vel = self.data.sensor("lin_vel").data.copy()  # velocimeter
         lin_acc = self.data.sensor("lin_acc").data.copy()  # accelerometer
+        up_dir = self.data.sensor("up_dir").data.copy()  # framezaxis
         wpt_dir = self._wpt_position - lin_pos
         wpt_dis = np.linalg.norm(wpt_dir, ord=2)
         wpt_dir /= wpt_dis
         geo_fence = np.array([self._healthy_x_range, self._healthy_y_range, self._healthy_z_range], dtype=np.float32)
         geo_fence_dist = np.abs(geo_fence - lin_pos.reshape(-1, 1))
-        aux_dat = np.concat((ang_pos, ang_vel, lin_vel, lin_acc, wpt_dir, geo_fence_dist.flatten()), axis=0).astype(np.float32)
+        aux_dat = np.concat((ang_vel, lin_vel, lin_acc, up_dir, wpt_dir, geo_fence_dist.flatten()), axis=0).astype(np.float32)
         img_dat = dict(rgb=np.concat((self._image_before[0], self._image_after[0]), axis=0), dep=np.concat((self._image_before[1], self._image_after[1]), axis=0))
         return tensordict.TensorDict(dict(img_dat=img_dat, aux_dat=aux_dat))
 
-    def _get_reward(self, action: np.array, wpt_conv: float, wpt_view: float, terminated: bool, truncated: bool):
-        # reward = 0.0
+    def _get_reward(self, action: np.array, wpt_app: float, terminated: bool, truncated: bool):
         if truncated:
             reward = 100.0
         elif terminated:
-            reward = -100.0
+            reward = 0.0
         else:
-            reward = wpt_conv + wpt_view
-        """
-        reward += self._wpt_dist_cost_scale * (1.0 / wpt_dist)
-        if truncated:
-            reward -= self._action_cost_scale * self._total_action_cost
-        else:
-            reward -= self._unhealthy_cost if terminated else 0.0
-        """
+            reward = wpt_app
         reward_info = dict()
         return reward, reward_info
 
@@ -239,21 +243,17 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
         translation = position_after - position_before
         velocity = np.linalg.norm(translation, ord=2) / self.dt
-        view_dir = self.data.sensor("view_dir").data.copy()
-        self._total_action_cost += np.linalg.norm(action, ord=2)
 
         obs = self._get_obs()
 
         terminated = False
         truncated = False
 
-        wpt_dir_before = self._wpt_position - position_before
-        wpt_dir_after = self._wpt_position - position_after
-        wpt_conv = np.dot(translation, wpt_dir_before) / (np.linalg.norm(translation) * np.linalg.norm(wpt_dir_before))
-        wpt_view = np.dot(view_dir, wpt_dir_before) / (np.linalg.norm(view_dir) * np.linalg.norm(wpt_dir_before))
-        wpt_dist = np.linalg.norm(wpt_dir_after, ord=2)
+        wpt_dist_before = np.linalg.norm(self._wpt_position - position_before, ord=2)
+        wpt_dist_after = np.linalg.norm(self._wpt_position - position_after, ord=2)
+        wpt_app = np.exp(-wpt_dist_after) - np.exp(-wpt_dist_before)
 
-        if wpt_dist < self._min_wpt_distance:
+        if wpt_dist_after < self._min_wpt_distance:
             try:
                 self._wpt_position = next(self._wpt_positions)
             except StopIteration:
@@ -261,7 +261,9 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
         is_healthy, health_info = self.is_healthy
         terminated = (not is_healthy) and self._terminate_when_unhealthy
-        reward, reward_info = self._get_reward(action, wpt_conv, wpt_view, terminated, truncated)
+        # print(f"{wpt_dist_before=}, {wpt_dist_after=}, diff={wpt_dist_after-wpt_dist_before}")
+        # print(f"{wpt_app=}, up_dir={self.data.sensor('up_dir').data.copy()[2]}")
+        reward, reward_info = self._get_reward(action, wpt_app, terminated, truncated)
 
         info = {
             "position_before": position_before,
@@ -275,13 +277,18 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         if self.render_mode == "human":
             self.render()
 
+        self._step_counter += 1
+
         return obs, reward, terminated, truncated, info
 
     def reset_model(self):
+        self._step_counter = 0
+
         noise_low = -self._reset_noise_scale
         noise_high = self._reset_noise_scale
 
         qpos = self.init_qpos + self.np_random.uniform(low=noise_low, high=noise_high, size=self.model.nq)
+        qpos[2] = np.clip(qpos[2], a_min=0.15, a_max=None)
         qvel = self.init_qvel + self._reset_noise_scale * self.np_random.standard_normal(self.model.nv)
         self.set_state(qpos, qvel)
         
