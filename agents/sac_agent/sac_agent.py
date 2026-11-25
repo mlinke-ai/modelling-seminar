@@ -145,10 +145,10 @@ class SACAgent(agent.Agent):
 
         # Entropy coefficient
         self.target_entropy = -torch.prod(torch.tensor(self.env.action_space.shape), dtype=torch.float32).item()
-        self.alpha = torch.tensor(
+        self.log_alpha = torch.tensor(
             np.log(self.config.alpha_init), dtype=torch.float32, requires_grad=True, device=self.device
         )
-        self.alpha_optimizer = optim.Adam([self.alpha], lr=self.config.alpha_lr)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.config.alpha_lr)
 
     def select_action(self, obs, probabilistic=False):
         with torch.no_grad():
@@ -186,7 +186,7 @@ class SACAgent(agent.Agent):
                 next_actions, next_log_probs = self.actor.sample(next_actor_latent)
                 q1_t = self.q1_target(next_critic_latent, next_actions)
                 q2_t = self.q2_target(next_critic_latent, next_actions)
-                q_t = torch.min(q1_t, q2_t) - self.alpha.exp() * next_log_probs
+                q_t = torch.min(q1_t, q2_t) - self.log_alpha.exp() * next_log_probs
                 q_t = (
                     self.config.reward_scale * transitions["rewards"]
                     + (1.0 - transitions["dones"]) * self.config.gamma * q_t
@@ -220,8 +220,8 @@ class SACAgent(agent.Agent):
             new_q1_c = self.q1_critic(critic_latent, new_actions)
             new_q2_c = self.q2_critic(critic_latent, new_actions)
             new_q_c = torch.min(new_q1_c, new_q2_c)
-            # actor_loss = (new_q_c - torch.unsqueeze(self.alpha.exp() * new_log_probs, -1)).mean()
-            actor_loss = (self.alpha.exp().detach() * new_log_probs - new_q_c).mean()
+            # actor_loss = (new_q_c - torch.unsqueeze(self.log_alpha.exp() * new_log_probs, -1)).mean()
+            actor_loss = (self.log_alpha.exp().detach() * new_log_probs - new_q_c).mean()
             # print(f"new_log_probs=[{new_log_probs.min().item()}; {new_log_probs.max().item()}]")
             # print(f"actor_loss={actor_loss.item()}")
             actor_loss.backward()
@@ -236,8 +236,8 @@ class SACAgent(agent.Agent):
 
             # update entropy
             self.alpha_optimizer.zero_grad()
-            alpha_loss = -(self.alpha.exp() * (new_log_probs + self.target_entropy).detach()).mean()
-            # print(f"alpha={self.alpha.exp().item()}")
+            alpha_loss = -(self.log_alpha * (self.target_entropy - new_log_probs).detach()).mean()
+            # print(f"alpha={self.log_alpha.exp().item()}")
             # print(f"alpha_loss={alpha_loss.item()}")
             alpha_loss.backward()
             self.alpha_optimizer.step()
@@ -387,7 +387,7 @@ class SACAgentConfig:
     max_action = 13.0
     tau = 0.995
     gamma = 0.99
-    reward_scale = 0.01
+    reward_scale = 1.0
     alpha_init = 0.2
     state_encoder_lr = 3e-4
     actor_lr = 3e-4
