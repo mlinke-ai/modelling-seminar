@@ -29,7 +29,7 @@ class StateEncoder(nn.Module):
 
     def forward(self, obs):
         img_feats = self.rgb_net(obs["img_dat", "rgb"])
-        dep_feats = self.dep_net(obs["img_dat", "dep"])
+        dep_feats = self.dep_net(torch.log(1.0 + obs["img_dat", "dep"]))
         aux_feats = self.aux_net(obs["aux_dat"])
         features = torch.cat((img_feats, dep_feats, aux_feats), dim=-1)
         return self.encoder(features)
