@@ -132,11 +132,16 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             "render_fps": int(np.round(1.0 / self.dt)),
         }
 
-        self.observation_space = gym_spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(27, drone_camera_config["height"], drone_camera_config["width"]),
-            dtype=np.float32,
+        self.observation_space = gym_spaces.Dict(
+            {
+                "img_dat": gym_spaces.Dict(
+                    {
+                        "rgb": gym_spaces.Box(low=0, high=255, shape=(drone_camera_config["height"], drone_camera_config["width"], 6)),
+                        "dep": gym_spaces.Box(low=0.0, high=np.inf, shape=(drone_camera_config["height"], drone_camera_config["width"], 2)),
+                    }
+                ),
+                "aux_dat": gym_spaces.Box(low=-np.inf, high=np.inf, shape=(21,)),
+            }
         )
         self.action_space = gym_spaces.Box(low=0.0, high=13.0, shape=action_shape, dtype=np.float32)
 
