@@ -349,8 +349,8 @@ class TD3Agent(agent.Agent):
 class TD3AgentConfig:
     device = "cuda"
     batch_size = 32
-    num_updates = 2
-    update_interval = 2
+    num_updates = 32
+    update_interval = 32
     update_noise = 0.1
     noise_clip = 0.5
     replay_buffer_size = 1000000
@@ -364,7 +364,7 @@ class TD3AgentConfig:
     max_action = 13.0
     tau = 0.995
     gamma = 0.99
-    reward_scale = 0.01
+    reward_scale = 1.0
     state_encoder_lr = 3e-4
     actor_lr = 3e-4
     critic_lr = 3e-4
