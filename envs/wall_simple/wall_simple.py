@@ -34,6 +34,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         drone_body: int | str = "x2",
         waypoint_body: int | str = "wp",
         terminate_when_unhealthy: bool = True,
+        terminate_when_final: bool = True,
         healthy_x_range: tuple[float, float] = (-0.5, 8.5),
         healthy_y_range: tuple[float, float] = (-2.5, 2.5),
         healthy_z_range: tuple[float, float] = (0.1, 5.0),
@@ -67,6 +68,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
             drone_body,
             waypoint_body,
             terminate_when_unhealthy,
+            terminate_when_final,
             healthy_x_range,
             healthy_y_range,
             healthy_z_range,
@@ -88,6 +90,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         self._termination_cost = termination_cost
         self._truncation_reward = truncation_reward
         self._terminate_when_unhealthy = terminate_when_unhealthy
+        self._terminate_when_final = terminate_when_final
         self._healthy_x_range = healthy_x_range
         self._healthy_y_range = healthy_y_range
         self._healthy_z_range = healthy_z_range
@@ -164,7 +167,7 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
     @property
     def is_cosz_healthy(self):
         cosz_min = self._healthy_cosz
-        tilting = self.data.sensor("up_dir").data[2]
+        tilting = self.data.sensor("z_dir").data[2]
         return cosz_min <= tilting
 
     @property
@@ -191,14 +194,12 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
         is_healthy &= self.is_y_healthy
         is_healthy &= self.is_z_healthy
         is_healthy &= self.is_cosz_healthy
-        is_healthy &= self.is_t_healthy
         health_info = {
             "is_uncollided": is_uncollided,
             "is_x_healthy": self.is_x_healthy,
             "is_y_healthy": self.is_y_healthy,
             "is_z_healthy": self.is_z_healthy,
             "is_cosz_healthy": self.is_cosz_healthy,
-            "is_t_healthy": self.is_t_healthy,
             **collition_info,
         }
         return is_healthy, health_info
@@ -211,26 +212,31 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
     def _get_obs(self):
         ang_vel = self.data.sensor("ang_vel").data.copy()  # gyro
-        lin_pos = self.data.sensor("lin_pos").data.copy()  # framepos
         lin_vel = self.data.sensor("lin_vel").data.copy()  # velocimeter
         lin_acc = self.data.sensor("lin_acc").data.copy()  # accelerometer
-        up_dir = self.data.sensor("up_dir").data.copy()  # framezaxis
-        wpt_dir = self._wpt_position - lin_pos
+        lin_pos = self.data.sensor("lin_pos").data.copy()  # framepos
+        x_dir = 1.0 * self.data.sensor("x_dir").data.copy()  # framezaxis
+        y_dir = self.data.sensor("y_dir").data.copy()  # frameyaxis
+        z_dir = self.data.sensor("z_dir").data.copy()  # framezaxis
+        M = np.column_stack((x_dir, y_dir, z_dir))
+        wpt_dir = M.T @ (self._wpt_position - lin_pos)
         wpt_dis = np.linalg.norm(wpt_dir, ord=2)
         wpt_dir /= wpt_dis
         geo_fence = np.array([self._healthy_x_range, self._healthy_y_range, self._healthy_z_range], dtype=np.float32)
         geo_fence_dist = np.abs(geo_fence - lin_pos.reshape(-1, 1))
-        aux_dat = np.concat((ang_vel, lin_vel, lin_acc, up_dir, wpt_dir, geo_fence_dist.flatten()), axis=0).astype(np.float32)
+        aux_dat = np.concat((ang_vel, lin_vel, lin_acc, z_dir, wpt_dir, geo_fence_dist.flatten()), axis=0).astype(np.float32)
         img_dat = dict(rgb=np.concat((self._image_before[0], self._image_after[0]), axis=0), dep=np.concat((self._image_before[1], self._image_after[1]), axis=0))
         return tensordict.TensorDict(dict(img_dat=img_dat, aux_dat=aux_dat))
 
-    def _get_reward(self, action: np.array, wpt_app: float, terminated: bool, truncated: bool):
-        if truncated:
-            reward = 100.0
-        elif terminated:
+    def _get_reward(self, wpt_dist_before, wpt_dist_after, upright, is_healthy, wpt_reached):
+        if not is_healthy:
             reward = 0.0
+        elif wpt_reached:
+            reward = 100.0
         else:
-            reward = wpt_app
+            wpt_app = np.exp(-wpt_dist_after) - np.exp(-wpt_dist_before)
+            u = (upright - self._healthy_cosz) / (1.0 - self._healthy_cosz)
+            reward = wpt_app + u
         reward_info = dict()
         return reward, reward_info
 
@@ -243,27 +249,28 @@ class WallSimple(gym_mujoco.MujocoEnv, gym_utils.EzPickle):
 
         translation = position_after - position_before
         velocity = np.linalg.norm(translation, ord=2) / self.dt
+        wpt_dist_before = np.linalg.norm(self._wpt_position - position_before, ord=2)
+        wpt_dist_after = np.linalg.norm(self._wpt_position - position_after, ord=2)
+        upright = self.data.sensor("z_dir").data.copy()[2]
 
         obs = self._get_obs()
 
-        terminated = False
-        truncated = False
-
-        wpt_dist_before = np.linalg.norm(self._wpt_position - position_before, ord=2)
-        wpt_dist_after = np.linalg.norm(self._wpt_position - position_after, ord=2)
-        wpt_app = np.exp(-wpt_dist_after) - np.exp(-wpt_dist_before)
-
+        wpt_reached = False
+        wpt_final = False
         if wpt_dist_after < self._min_wpt_distance:
+            wpt_reached = True
             try:
                 self._wpt_position = next(self._wpt_positions)
             except StopIteration:
-                truncated = True
+                wpt_final = True
 
         is_healthy, health_info = self.is_healthy
         terminated = (not is_healthy) and self._terminate_when_unhealthy
+        terminated |= wpt_final and self._terminate_when_final
+        truncated = not (self._step_counter < self._max_steps)
         # print(f"{wpt_dist_before=}, {wpt_dist_after=}, diff={wpt_dist_after-wpt_dist_before}")
         # print(f"{wpt_app=}, up_dir={self.data.sensor('up_dir').data.copy()[2]}")
-        reward, reward_info = self._get_reward(action, wpt_app, terminated, truncated)
+        reward, reward_info = self._get_reward(wpt_dist_before, wpt_dist_after, upright, is_healthy, wpt_reached)
 
         info = {
             "position_before": position_before,
